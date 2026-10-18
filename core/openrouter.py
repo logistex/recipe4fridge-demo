@@ -1,0 +1,164 @@
+"""OpenRouter chat completions 클라이언트 (재시도, 예비 모델 전환, 전체 제한 시간, 오류 변환)."""
+
+import logging
+import time
+from collections.abc import Callable, Sequence
+
+import httpx
+
+from core import config
+from core.errors import AppError
+
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODELS_URL = "https://openrouter.ai/api/v1/models"
+RETRYABLE_STATUS = {429, 502, 503}
+# 기본 모델이 이 오류로 끝나면 예비 모델로 넘어간다 (API 키 문제 같은 CONFIG_ERROR는 넘어가도 소용없다)
+FALLBACK_ON = {"MODEL_BUSY", "UPSTREAM_ERROR", "MODEL_TIMEOUT"}
+
+log = logging.getLogger(__name__)
+
+RetryCallback = Callable[[int, int], None]
+FallbackCallback = Callable[[str], None]
+
+
+class OpenRouterClient:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        retry_delays: tuple[int, ...] = config.RETRY_DELAYS,
+        request_timeout: float = config.REQUEST_TIMEOUT_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self._http = httpx.Client(
+            transport=transport,
+            timeout=request_timeout,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Title": "recipe4fridge-demo",
+            },
+        )
+        self._retry_delays = retry_delays
+        self._request_timeout = request_timeout
+        self._sleep = sleep
+        self._clock = clock
+
+    def chat(
+        self,
+        payload: dict,
+        *,
+        deadline_seconds: float,
+        on_retry: RetryCallback | None = None,
+        retry_delays: tuple[int, ...] | None = None,
+        attempt_timeout: float | None = None,
+    ) -> dict:
+        """요청을 보내고 응답 JSON을 돌려준다. 일시적 오류면 retry_delays만큼 기다렸다 다시 보낸다."""
+        delays = self._retry_delays if retry_delays is None else retry_delays
+        per_attempt = min(self._request_timeout, attempt_timeout or self._request_timeout)
+        start = self._clock()
+        last_status = None
+        for attempt in range(len(delays) + 1):
+            remaining = deadline_seconds - (self._clock() - start)
+            if remaining <= 0:
+                break
+            try:
+                resp = self._http.post(API_URL, json=payload, timeout=min(remaining, per_attempt))
+            except httpx.TimeoutException:
+                raise AppError("MODEL_TIMEOUT") from None
+            except httpx.HTTPError as e:
+                log.warning("OpenRouter 연결 실패: %s", type(e).__name__)
+                raise AppError("UPSTREAM_ERROR") from None
+
+            status, data = _status_and_body(resp)
+            log.info("OpenRouter model=%s status=%s attempt=%d", payload.get("model"), status, attempt + 1)
+            if status == 200:
+                return data
+            last_status = status
+
+            if status not in RETRYABLE_STATUS or attempt == len(delays):
+                break
+            wait = delays[attempt]
+            if (self._clock() - start) + wait >= deadline_seconds:
+                break
+            if on_retry:
+                on_retry(attempt + 1, wait)
+            self._sleep(wait)
+
+        if last_status is None:
+            raise AppError("MODEL_TIMEOUT")
+        if last_status == 429:
+            raise AppError("MODEL_BUSY")
+        if last_status == 401:
+            raise AppError("CONFIG_ERROR")
+        raise AppError("UPSTREAM_ERROR")
+
+    def chat_with_fallback(
+        self,
+        build_payload: Callable[[str], dict],
+        models: Sequence[str],
+        *,
+        deadline_seconds: float,
+        attempt_timeout: float | None = None,
+        on_retry: RetryCallback | None = None,
+        on_fallback: FallbackCallback | None = None,
+    ) -> tuple[str, dict]:
+        """첫 모델은 재시도 정책대로, 예비 모델은 한 번씩만 시도한다. (응답한 모델, 응답)을 돌려준다."""
+        start = self._clock()
+        primary, *fallbacks = models
+        try:
+            return primary, self.chat(
+                build_payload(primary),
+                deadline_seconds=deadline_seconds,
+                on_retry=on_retry,
+                attempt_timeout=attempt_timeout,
+            )
+        except AppError as e:
+            if e.code not in FALLBACK_ON or not fallbacks:
+                raise
+            last_error = e
+
+        for model in fallbacks:
+            remaining = deadline_seconds - (self._clock() - start)
+            if remaining <= 0:
+                break
+            log.info("예비 모델로 전환: %s", model)
+            if on_fallback:
+                on_fallback(model)
+            try:
+                return model, self.chat(
+                    build_payload(model), deadline_seconds=remaining, retry_delays=(), attempt_timeout=attempt_timeout
+                )
+            except AppError as e:  # 예비 모델은 어떤 이유로 실패하든 다음 모델로 넘어간다
+                last_error = e
+        raise AppError("MODEL_TIMEOUT" if last_error.code == "MODEL_TIMEOUT" else "MODEL_BUSY")
+
+    def free_vision_models(self) -> dict[str, set[str]]:
+        """이미지를 받는 무료 모델과 각 모델이 지원하는 파라미터. 모델 목록은 키 없이 공개된 API다."""
+        resp = self._http.get(MODELS_URL, timeout=30)
+        resp.raise_for_status()
+        models = {}
+        for m in resp.json().get("data", []):
+            modalities = (m.get("architecture") or {}).get("input_modalities") or []
+            if m.get("id", "").endswith(":free") and "image" in modalities:
+                models[m["id"]] = set(m.get("supported_parameters") or [])
+        return models
+
+
+def _status_and_body(resp: httpx.Response) -> tuple[int, dict]:
+    """OpenRouter는 HTTP 200 본문에 error 객체를 담아 보내기도 하므로, 그 코드를 상태로 쓴다."""
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    status = resp.status_code
+    error = data.get("error")
+    if status == 200 and isinstance(error, dict):
+        code = error.get("code")
+        status = code if isinstance(code, int) else 502
+    elif status == 200 and not data.get("choices"):
+        status = 502
+    return status, data

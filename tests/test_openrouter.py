@@ -1,0 +1,184 @@
+import json
+
+import httpx
+import pytest
+
+from core.errors import AppError
+from core.openrouter import OpenRouterClient
+
+OK_BODY = {"model": "m", "choices": [{"message": {"content": "{}"}}]}
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def make_client(responses, clock=None):
+    """responses: 차례로 돌려줄 httpx.Response 또는 예외."""
+    calls = []
+    queue = list(responses)
+
+    def handler(request: httpx.Request):
+        calls.append(request)
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    clock = clock or FakeClock()
+    client = OpenRouterClient("test-key", transport=httpx.MockTransport(handler), sleep=clock.sleep, clock=clock)
+    return client, calls, clock
+
+
+def requested_models(calls):
+    return [json.loads(c.content)["model"] for c in calls]
+
+
+# --- chat: 같은 모델 재시도 ------------------------------------------------------
+
+def test_success_sends_auth_header():
+    client, calls, _ = make_client([httpx.Response(200, json=OK_BODY)])
+    assert client.chat({"model": "m"}, deadline_seconds=90) == OK_BODY
+    assert calls[0].headers["Authorization"] == "Bearer test-key"
+
+
+def test_retries_429_once_then_succeeds():
+    retries = []
+    client, calls, clock = make_client([httpx.Response(429, json={}), httpx.Response(200, json=OK_BODY)])
+    client.chat({"model": "m"}, deadline_seconds=90, on_retry=lambda a, w: retries.append((a, w)))
+    assert len(calls) == 2
+    assert retries == [(1, 10)]
+    assert clock.now == 10
+
+
+def test_persistent_429_gives_model_busy_after_one_retry():
+    client, calls, _ = make_client([httpx.Response(429, json={})] * 2)
+    with pytest.raises(AppError) as exc:
+        client.chat({"model": "m"}, deadline_seconds=90)
+    assert exc.value.code == "MODEL_BUSY"
+    assert len(calls) == 2
+
+
+def test_skips_retry_when_deadline_would_pass():
+    client, calls, clock = make_client([httpx.Response(429, json={})])
+    with pytest.raises(AppError) as exc:
+        client.chat({"model": "m"}, deadline_seconds=5)
+    assert exc.value.code == "MODEL_BUSY"
+    assert len(calls) == 1 and clock.now == 0
+
+
+def test_error_object_in_200_body_is_treated_as_status():
+    client, calls, _ = make_client(
+        [httpx.Response(200, json={"error": {"code": 429, "message": "rate limited"}}), httpx.Response(200, json=OK_BODY)]
+    )
+    assert client.chat({"model": "m"}, deadline_seconds=90) == OK_BODY
+    assert len(calls) == 2
+
+
+def test_timeout_gives_model_timeout():
+    client, _, _ = make_client([httpx.ReadTimeout("slow")])
+    with pytest.raises(AppError) as exc:
+        client.chat({"model": "m"}, deadline_seconds=90)
+    assert exc.value.code == "MODEL_TIMEOUT"
+
+
+@pytest.mark.parametrize(
+    "status,code", [(401, "CONFIG_ERROR"), (403, "UPSTREAM_ERROR"), (500, "UPSTREAM_ERROR"), (400, "UPSTREAM_ERROR")]
+)
+def test_non_retryable_errors_fail_immediately(status, code):
+    client, calls, _ = make_client([httpx.Response(status, json={"error": {"message": "secret detail"}})])
+    with pytest.raises(AppError) as exc:
+        client.chat({"model": "m"}, deadline_seconds=90)
+    assert exc.value.code == code
+    assert "secret detail" not in exc.value.message  # 원문을 사용자에게 노출하지 않음
+    assert len(calls) == 1
+
+
+def test_connection_error_gives_upstream_error():
+    client, _, _ = make_client([httpx.ConnectError("down")])
+    with pytest.raises(AppError) as exc:
+        client.chat({"model": "m"}, deadline_seconds=90)
+    assert exc.value.code == "UPSTREAM_ERROR"
+
+
+# --- chat_with_fallback: 예비 모델 전환 -------------------------------------------
+
+def build(model):
+    return {"model": model}
+
+
+def test_falls_back_after_one_retry_on_429():
+    switched = []
+    client, calls, _ = make_client(
+        [httpx.Response(429, json={}), httpx.Response(429, json={}), httpx.Response(200, json=OK_BODY)]
+    )
+    model, body = client.chat_with_fallback(
+        build, ["primary", "fb1", "fb2"], deadline_seconds=120, on_fallback=switched.append
+    )
+    assert (model, body) == ("fb1", OK_BODY)
+    assert requested_models(calls) == ["primary", "primary", "fb1"]
+    assert switched == ["fb1"]
+
+
+def test_each_fallback_is_tried_once_and_any_error_moves_on():
+    client, calls, clock = make_client(
+        [
+            httpx.Response(429, json={}),
+            httpx.Response(429, json={}),
+            httpx.Response(429, json={}),  # fb1: 재시도 없이 다음으로
+            httpx.Response(403, json={}),  # fb2: 403도 다음으로
+            httpx.Response(200, json=OK_BODY),
+        ]
+    )
+    model, _ = client.chat_with_fallback(build, ["primary", "fb1", "fb2", "fb3"], deadline_seconds=120)
+    assert model == "fb3"
+    assert requested_models(calls) == ["primary", "primary", "fb1", "fb2", "fb3"]
+    assert clock.now == 10  # 기다린 것은 기본 모델 재시도 한 번뿐
+
+
+def test_all_models_busy_gives_model_busy():
+    client, calls, _ = make_client([httpx.Response(429, json={})] * 4)
+    with pytest.raises(AppError) as exc:
+        client.chat_with_fallback(build, ["primary", "fb1", "fb2"], deadline_seconds=120)
+    assert exc.value.code == "MODEL_BUSY"
+    assert len(calls) == 4
+
+
+def test_primary_success_does_not_touch_fallbacks():
+    client, calls, _ = make_client([httpx.Response(200, json=OK_BODY)])
+    assert client.chat_with_fallback(build, ["primary", "fb1"], deadline_seconds=120)[0] == "primary"
+    assert len(calls) == 1
+
+
+def test_invalid_api_key_does_not_fall_back():
+    client, calls, _ = make_client([httpx.Response(401, json={})])
+    with pytest.raises(AppError) as exc:
+        client.chat_with_fallback(build, ["primary", "fb1"], deadline_seconds=120)
+    assert exc.value.code == "CONFIG_ERROR"
+    assert len(calls) == 1
+
+
+def test_no_fallbacks_raises_primary_error():
+    client, _, _ = make_client([httpx.Response(429, json={})] * 2)
+    with pytest.raises(AppError) as exc:
+        client.chat_with_fallback(build, ["primary"], deadline_seconds=120)
+    assert exc.value.code == "MODEL_BUSY"
+
+
+def test_free_vision_models_filters_free_image_models():
+    body = {
+        "data": [
+            {"id": "a/vision:free", "architecture": {"input_modalities": ["text", "image"]}, "supported_parameters": ["response_format"]},
+            {"id": "b/text:free", "architecture": {"input_modalities": ["text"]}},
+            {"id": "c/vision-paid", "architecture": {"input_modalities": ["image"]}},
+        ]
+    }
+    client, _, _ = make_client([httpx.Response(200, json=body)])
+    assert client.free_vision_models() == {"a/vision:free": {"response_format"}}
