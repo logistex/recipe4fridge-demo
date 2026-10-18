@@ -1,13 +1,20 @@
 """1단계: 냉장고 사진에서 식재료 인식 (docs/PRD_step1.md)."""
 
-import pandas as pd
 import streamlit as st
 
 from core import config
 from core.errors import MESSAGES, AppError
-from core.fridge_flow import confirmed_from_rows, image_digest, request_recognition, to_editor_rows
+from core.fridge_flow import (
+    confirmed_from_rows,
+    image_digest,
+    init_rows,
+    new_row,
+    rename_row,
+    request_recognition,
+    row_flag,
+)
 from core.runtime import get_client, get_daily_limiter, supports_json_mode, vision_model_plan
-from core.vision import CATEGORIES, prepare_image, recognize_ingredients
+from core.vision import prepare_image, recognize_ingredients
 
 UPLOAD = "사진 올리기"
 CAMERA = "카메라로 찍기"
@@ -137,36 +144,86 @@ if recognition:
             st.warning("냉장고나 식재료 사진이 아닌 것 같아요. 냉장고 안이 잘 보이게 다시 찍어 주세요.")
         else:
             st.warning("식재료를 찾지 못했어요. 밝은 곳에서 냉장고 안이 잘 보이게 다시 찍어 주세요.")
-        st.caption("아래 표에 재료를 직접 추가할 수도 있어요.")
+        st.caption("아래 '재료 추가' 줄에서 재료를 직접 넣을 수도 있어요.")
 
-    suspect = [ing["name"] for ing in result["ingredients"] if ing.get("name_suspect")]
-    low = [ing["name"] for ing in result["ingredients"] if ing["confidence"] == "low" and not ing.get("name_suspect")]
+    # 인식 결과를 한 줄씩 고칠 수 있는 행으로 바꿔 보관한다. 새 사진을 인식하면 다시 만든다.
+    prefix = recognition["digest"][:8]
+    if state.get("rows_for") != recognition["digest"]:
+        state["ing_rows"] = init_rows(result, prefix)
+        state["rows_for"] = recognition["digest"]
+        state["row_seq"] = 0
+    rows = state["ing_rows"]
+
+    suspect = [r["name"] for r in rows if row_flag(r) == "name"]
+    low = [r["name"] for r in rows if row_flag(r) == "low"]
     if suspect:
-        st.warning("재료 이름이 잘못 인식된 것 같아요. 표에서 바르게 고쳐 주세요: " + ", ".join(suspect))
+        st.warning("재료 이름이 잘못 인식된 것 같아요. 바르게 고쳐 주세요: " + ", ".join(suspect))
     if low:
         st.warning("다음 재료는 사진에서 확실하지 않아요. 맞는지 확인해 주세요: " + ", ".join(low))
     if result.get("notes"):
         st.info(result["notes"])
 
-    rows = pd.DataFrame(to_editor_rows(result), columns=["name", "quantity", "unit", "category", "check"])
-    rows["quantity"] = pd.to_numeric(rows["quantity"], errors="coerce")  # 수량이 모두 비어도 숫자 열로 유지
-    edited = st.data_editor(
-        rows,
-        key=f"editor_{recognition['digest'][:16]}",
-        num_rows="dynamic",
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "name": st.column_config.TextColumn("재료명", required=True, max_chars=30),
-            "quantity": st.column_config.NumberColumn("수량", min_value=0),
-            "unit": st.column_config.TextColumn("단위", max_chars=10),
-            "category": st.column_config.SelectboxColumn("분류", options=CATEGORIES, required=True, default="기타"),
-            "check": st.column_config.TextColumn("확인", disabled=True),
-        },
+    def _delete_row(row_id: str) -> None:
+        state["ing_rows"] = [r for r in state["ing_rows"] if r["id"] != row_id]
+
+    def _add_row() -> None:
+        name = (state.get("new_name") or "").strip()
+        if not name:
+            return
+        state["row_seq"] += 1
+        state["ing_rows"].append(
+            new_row(f"{prefix}-a{state['row_seq']}", name, state.get("new_qty"), state.get("new_unit"))
+        )
+        state["new_name"], state["new_qty"], state["new_unit"] = "", None, ""
+
+    # 재료명 · 수량 · 단위 · 삭제를 한 줄에 둔다. st.columns는 칸마다 최소 너비가 있어 휴대폰에서 줄이
+    # 화면 밖으로 넘치므로, 수평 컨테이너에 수량·단위·단추는 고정 너비로, 재료명은 남는 폭으로 둔다.
+    QTY_W, UNIT_W, BTN_W = 130, 56, 40
+
+    def _line():
+        return st.container(horizontal=True, wrap=False, vertical_alignment="center", gap="small")
+
+    header = _line()
+    header.caption("재료명", width="stretch")
+    header.caption("수량", width=QTY_W)
+    header.caption("단위", width=UNIT_W)
+    header.caption("", width=BTN_W)
+
+    for row in rows:
+        line = _line()
+        rid = row["id"]
+        name = line.text_input(
+            "재료명", value=row["name"], key=f"name_{rid}", max_chars=30, label_visibility="collapsed",
+            icon=":material/warning:" if row_flag(row) else None, width="stretch",
+        )
+        rename_row(row, name)
+        row["quantity"] = line.number_input(
+            "수량", value=None if row["quantity"] is None else float(row["quantity"]), min_value=0.0, step=1.0,
+            format="%g", key=f"qty_{rid}", label_visibility="collapsed", placeholder="-", width=QTY_W,
+        )
+        row["unit"] = line.text_input(
+            "단위", value=row["unit"] or "", key=f"unit_{rid}", max_chars=10, label_visibility="collapsed",
+            placeholder="단위", width=UNIT_W,
+        )
+        line.button(
+            ":material/delete:", key=f"del_{rid}", help=f"{row['name']} 삭제", on_click=_delete_row, args=(rid,),
+            width=BTN_W,
+        )
+
+    line = _line()
+    line.text_input(
+        "새 재료", key="new_name", max_chars=30, label_visibility="collapsed", placeholder="재료 추가", width="stretch"
     )
-    state["confirmed_ingredients"] = confirmed_from_rows(edited.to_dict("records"))
+    line.number_input(
+        "새 수량", value=None, min_value=0.0, step=1.0, format="%g", key="new_qty", label_visibility="collapsed",
+        placeholder="수량", width=QTY_W,
+    )
+    line.text_input("새 단위", key="new_unit", max_chars=10, label_visibility="collapsed", placeholder="단위", width=UNIT_W)
+    line.button(":material/add:", key="add_row", help="재료 추가", on_click=_add_row, width=BTN_W)
+
+    state["confirmed_ingredients"] = confirmed_from_rows(rows)
 
     count = len(state["confirmed_ingredients"])
-    st.caption(f"확정한 재료 {count}개 · 행을 눌러 고치거나, 맨 아래에서 추가하거나, 체크해서 지울 수 있어요.")
+    st.caption(f"확정한 재료 {count}개 · 이름과 수량을 바로 고치고, 휴지통 단추로 지울 수 있어요.")
     if st.button("이 재료로 레시피 찾기", type="primary", disabled=count == 0, width="stretch"):
         st.info("레시피 추천은 다음 단계에서 연결됩니다.")

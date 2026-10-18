@@ -8,6 +8,7 @@ import hashlib
 from collections.abc import Callable, MutableMapping
 
 from core.errors import AppError
+from core.ingredient_names import category_for, is_suspicious_name
 from core.usage import DailyLimiter, check_session_rate
 from core.vision import RecognitionResult
 
@@ -43,23 +44,50 @@ def request_recognition(
     return state["recognition"]
 
 
-def check_label(ing: dict) -> str:
-    if ing.get("name_suspect"):
-        return "⚠ 이름 확인"
-    return "⚠ 확인 필요" if ing["confidence"] == "low" else ""
-
-
-def to_editor_rows(result: dict) -> list[dict]:
+def init_rows(result: dict, prefix: str) -> list[dict]:
+    """인식 결과를 화면에서 한 줄씩 고칠 수 있는 행으로 바꾼다. id는 위젯 key에 쓰인다."""
     return [
         {
+            "id": f"{prefix}-{i}",
             "name": ing["name"],
             "quantity": ing["quantity"],
             "unit": ing["unit"],
             "category": ing["category"],
-            "check": check_label(ing),
+            "low": ing["confidence"] == "low",
+            "original_name": ing["name"],
         }
-        for ing in result["ingredients"]
+        for i, ing in enumerate(result["ingredients"])
     ]
+
+
+def new_row(row_id: str, name: str, quantity, unit: str | None) -> dict:
+    name = name.strip()
+    return {
+        "id": row_id,
+        "name": name,
+        "quantity": quantity,
+        "unit": (unit or "").strip() or None,
+        "category": category_for(name) or "기타",
+        "low": False,
+        "original_name": name,
+    }
+
+
+def rename_row(row: dict, name: str) -> None:
+    """이름을 고치면 사전으로 분류를 다시 정한다(사전에 없으면 기존 분류 유지)."""
+    if name != row["name"]:
+        row["name"] = name
+        row["category"] = category_for(name.strip()) or row["category"]
+
+
+def row_flag(row: dict) -> str:
+    """"name": 이름이 깨진 것 같음, "low": 사진에서 확실하지 않음(이름을 고치면 사라짐), "": 문제 없음."""
+    name = (row.get("name") or "").strip()
+    if name and is_suspicious_name(name):
+        return "name"
+    if row.get("low") and name == row.get("original_name"):
+        return "low"
+    return ""
 
 
 def confirmed_from_rows(rows: list[dict]) -> list[dict]:

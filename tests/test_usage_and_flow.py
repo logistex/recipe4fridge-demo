@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from core.errors import AppError
-from core.fridge_flow import confirmed_from_rows, request_recognition, to_editor_rows
+from core.fridge_flow import confirmed_from_rows, init_rows, new_row, rename_row, request_recognition, row_flag
 from core.usage import DailyLimiter, check_session_rate
 from core.vision import Ingredient, RecognitionResult
 
@@ -77,15 +77,42 @@ def test_session_rate_limit_blocks_before_calling_model():
     assert recognize.calls == 3
 
 
-def test_editor_rows_mark_low_confidence():
-    rows = to_editor_rows(fake_result().to_dict())
-    assert rows == [{"name": "달걀", "quantity": 1, "unit": "개", "category": "기타", "check": "⚠ 확인 필요"}]
+def test_init_rows_keep_quantity_and_give_stable_ids():
+    rows = init_rows(fake_result(("달걀", "우유")).to_dict(), "abcd1234")
+    assert [r["id"] for r in rows] == ["abcd1234-0", "abcd1234-1"]
+    assert rows[0] | {"id": None} == {
+        "id": None, "name": "달걀", "quantity": 1, "unit": "개", "category": "기타", "low": True, "original_name": "달걀",
+    }
 
 
-def test_editor_rows_mark_suspicious_names_separately():
-    result = fake_result(("달strand",)).to_dict()
-    result["ingredients"][0]["name_suspect"] = True
-    assert to_editor_rows(result)[0]["check"] == "⚠ 이름 확인"
+def test_row_flag_low_confidence_clears_when_name_is_edited():
+    row = init_rows(fake_result(("김치",)).to_dict(), "p")[0]
+    assert row_flag(row) == "low"
+    rename_row(row, "배추김치")
+    assert row_flag(row) == ""
+    assert row["category"] == "반찬·가공식품"  # 이름을 고치면 사전으로 분류도 다시 정함
+
+
+def test_row_flag_suspicious_name_until_fixed():
+    row = init_rows(fake_result(("달strand",)).to_dict(), "p")[0]
+    assert row_flag(row) == "name"
+    rename_row(row, "달걀")
+    assert row_flag(row) == "" and row["category"] == "유제품·달걀"
+
+
+def test_rename_keeps_category_for_unknown_names():
+    row = init_rows(fake_result(("버터",)).to_dict(), "p")[0]
+    row["category"] = "유제품·달걀"
+    rename_row(row, "무염 발효 버터밀크")
+    assert row["category"] == "유제품·달걀"
+
+
+def test_new_row_uses_dictionary_category():
+    assert new_row("x", " 고등어 ", 2.0, " 마리 ") == {
+        "id": "x", "name": "고등어", "quantity": 2.0, "unit": "마리", "category": "해산물", "low": False,
+        "original_name": "고등어",
+    }
+    assert new_row("y", "브리오슈", None, "")["category"] == "기타"
 
 
 def test_confirmed_rows_skip_blank_names_and_clean_values():

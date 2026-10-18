@@ -34,6 +34,7 @@ python scripts/test_openrouter.py [text|image]          # 실제 API 동작 확�
   - 예비 모델 목록은 `config.DEFAULT_FALLBACK_VISION_MODELS`(선정 이유는 주석과 PRD 1단계 7장)이고, `runtime.vision_model_plan()`이 OpenRouter 모델 목록(6시간 캐시)으로 지금 무료로 이미지를 받는 모델만 남깁니다. OpenRouter API에는 모델별 인기 수치가 없으므로, 목록을 바꿀 때는 실제로 한 번씩 호출해 확인합니다.
   - `fridge_flow.py`: 같은 사진(SHA-256)은 다시 인식하지 않고, 세션당 분당 제한과 앱 전체 하루 제한을 확인한 뒤에만 모델을 부릅니다.
 - Streamlit은 위젯을 조작할 때마다 스크립트 전체를 다시 실행합니다. 그래서 모델 호출은 버튼의 `on_click`으로 `pending` 플래그를 세운 실행에서만 일어나고, 끝나면 `st.rerun()`합니다. 결과는 `st.session_state`에 둡니다. 2단계 이후의 모델 호출도 같은 방식을 따릅니다.
+- 인식 결과는 `fridge_flow.init_rows()`로 `st.session_state["ing_rows"]`에 행으로 옮겨, 행마다 `name_{id}`, `qty_{id}`, `unit_{id}`, `del_{id}` 위젯을 한 줄에 그립니다(`id`는 `<사진 해시 8자>-<순번>`). 한 줄 배치는 `st.container(horizontal=True, wrap=False)`와 고정 너비로 합니다. `st.columns`는 휴대폰에서 줄이 넘치고, 수량 칸이 130px보다 좁으면 −/+ 단추가 사라집니다.
 - 2단계 입력은 `st.session_state["confirmed_ingredients"]`(`name`, `quantity`, `unit`, `category` 목록)입니다.
 - `tests/test_fridge_page.py`는 `AppTest`로 화면을 돌리며, `core.vision.recognize_ingredients`와 `core.runtime.vision_model_plan`(네트워크 호출)을 monkeypatch합니다. 페이지가 매 실행마다 `from core... import ...`를 다시 하기 때문에 이 방식이 통합니다.
 - `core/` 파일을 고친 뒤 실행 중인 Streamlit 서버는 예전 모듈을 그대로 들고 있을 수 있습니다(ImportError 등). 서버를 다시 시작합니다.

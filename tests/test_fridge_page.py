@@ -10,6 +10,7 @@ import core.runtime
 import core.vision
 from conftest import make_image_bytes
 from core.errors import MESSAGES, AppError
+from core.fridge_flow import image_digest
 from core.runtime import get_daily_limiter
 from core.vision import Ingredient, RecognitionResult
 
@@ -72,6 +73,66 @@ def test_recognition_shows_editable_table(monkeypatch, png_bytes):
     assert [i["name"] for i in at.session_state["confirmed_ingredients"]] == ["달걀", "김치"]
     assert not button(at, "재료 인식").disabled  # 인식이 끝나면 다시 누를 수 있음
     assert not button(at, "이 재료로 레시피 찾기").disabled
+
+
+def _row_keys(png_bytes, i):
+    rid = f"{image_digest(png_bytes)[:8]}-{i}"
+    return f"name_{rid}", f"qty_{rid}", f"unit_{rid}", f"del_{rid}"
+
+
+def test_each_row_has_name_quantity_unit_and_delete(monkeypatch, png_bytes):
+    monkeypatch.setattr(core.vision, "recognize_ingredients", FakeRecognizer(food_result()))
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+
+    name_key, qty_key, unit_key, del_key = _row_keys(png_bytes, 0)
+    assert at.text_input(key=name_key).value == "달걀"
+    assert at.number_input(key=qty_key).value == 6
+    assert at.text_input(key=unit_key).value == "개"
+    assert at.button(key=del_key)
+    assert at.number_input(key=_row_keys(png_bytes, 1)[1]).value is None  # 김치: 수량 모름
+
+
+def test_editing_name_and_quantity_updates_confirmed_list(monkeypatch, png_bytes):
+    fake = FakeRecognizer(food_result())
+    monkeypatch.setattr(core.vision, "recognize_ingredients", fake)
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+
+    name_key, qty_key, _, _ = _row_keys(png_bytes, 1)
+    at.text_input(key=name_key).input("배추김치").run()
+    at.number_input(key=qty_key).set_value(2.0).run()
+    kimchi = at.session_state["confirmed_ingredients"][1]
+    assert (kimchi["name"], kimchi["quantity"]) == ("배추김치", 2.0)
+    assert not any("확실하지 않아요" in w.value for w in at.warning)  # 이름을 고치면 확인 필요 안내가 사라짐
+    assert fake.calls == 1
+
+
+def test_delete_button_removes_row(monkeypatch, png_bytes):
+    monkeypatch.setattr(core.vision, "recognize_ingredients", FakeRecognizer(food_result()))
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+
+    at.button(key=_row_keys(png_bytes, 0)[3]).click().run()
+    assert [i["name"] for i in at.session_state["confirmed_ingredients"]] == ["김치"]
+    assert not any(t.key == _row_keys(png_bytes, 0)[0] for t in at.text_input)
+
+
+def test_add_row_appends_ingredient_and_clears_inputs(monkeypatch, png_bytes):
+    monkeypatch.setattr(core.vision, "recognize_ingredients", FakeRecognizer(food_result()))
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+
+    at.text_input(key="new_name").input("고등어")
+    at.number_input(key="new_qty").set_value(2.0)
+    at.text_input(key="new_unit").input("마리")
+    at.button(key="add_row").click().run()
+    added = at.session_state["confirmed_ingredients"][-1]
+    assert added == {"name": "고등어", "quantity": 2.0, "unit": "마리", "category": "해산물"}
+    assert at.text_input(key="new_name").value == ""
+
+
+def test_add_row_ignores_blank_name(monkeypatch, png_bytes):
+    monkeypatch.setattr(core.vision, "recognize_ingredients", FakeRecognizer(food_result()))
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+    at.button(key="add_row").click().run()
+    assert len(at.session_state["confirmed_ingredients"]) == 2
 
 
 def test_other_interactions_do_not_call_model_again(monkeypatch, png_bytes):
