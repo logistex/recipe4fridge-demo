@@ -14,6 +14,7 @@ from core.fridge_flow import (
     row_flag,
 )
 from core.runtime import get_client, get_daily_limiter, supports_json_mode, vision_model_plan
+from core.ui import show_failure, show_process
 from core.vision import prepare_image, recognize_ingredients
 
 UPLOAD = "사진 올리기"
@@ -91,11 +92,16 @@ if busy and image_bytes and not image_error:
     try:
         with st.status("재료를 찾고 있어요 (1~2분 걸릴 수 있어요)", expanded=True) as status:
 
+            # 진행 안내도 원인을 단정하지 않는다(예비 모델로 넘어가는 이유는 429, 502, 시간 초과 등 여러 가지다).
+            switched = []
+
             def on_retry(attempt: int, wait: int) -> None:
-                status.write(f"요청이 몰려 {wait}초 뒤 한 번 더 시도합니다.")
+                status.write(f"기본 모델이 일시적 오류(429·502·503)를 돌려줘서 {wait}초 뒤 한 번 더 시도합니다.")
 
             def on_fallback(model: str) -> None:
-                status.write(f"기본 모델이 붐벼서 예비 모델({_short(model)})로 다시 시도합니다.")
+                before = "앞의 예비 모델도" if switched else "기본 모델이"
+                switched.append(model)
+                status.write(f"{before} 실패해서 예비 모델({_short(model)})로 다시 시도합니다.")
 
             def recognize(data: bytes):
                 primary, fallbacks, catalog = vision_model_plan(api_key)
@@ -118,27 +124,35 @@ if busy and image_bytes and not image_error:
                     per_minute=config.SESSION_REQUESTS_PER_MINUTE,
                 )
                 state.pop("recognition_error", None)
-                status.update(label="재료를 찾았어요", state="complete", expanded=False)
+                status.update(label="재료 인식 완료", state="complete", expanded=False)
             except AppError as e:
-                state["recognition_error"] = e.message
-                status.update(label="재료를 찾지 못했어요", state="error", expanded=False)
+                state["recognition_error"] = {
+                    "message": e.message, "attempts": e.attempts, "digest": image_digest(image_bytes),
+                }
+                status.update(label="재료 인식 실패", state="error", expanded=False)
     finally:
         state["pending"] = False
     st.rerun()
 
-if state.get("recognition_error"):
-    st.error(state["recognition_error"])
+# 실패는 숨기지 않는다. 지금 올린 사진에 대한 실패만 보여 준다(사진을 바꾸면 그 사진은 아직 시도 전이므로).
+error = state.get("recognition_error")
+failed_now = bool(error and image_bytes and error["digest"] == image_digest(image_bytes))
+if failed_now:
+    show_failure("재료 인식에 실패했어요", error)
 
 # --- 인식 결과 ---------------------------------------------------------------
 recognition = state.get("recognition")
 if recognition:
     result = recognition["result"]
-    if image_bytes and image_digest(image_bytes) != recognition["digest"]:
+    if failed_now:
+        st.warning("아래는 이전 사진에서 성공한 인식 결과예요. 방금 올린 사진의 인식은 실패했어요.")
+    elif image_bytes and image_digest(image_bytes) != recognition["digest"]:
         st.info("아래는 이전 사진의 결과예요. 새 사진은 '재료 인식'을 눌러 주세요.")
 
     st.subheader("찾은 재료")
     if result.get("fallback_used"):
-        st.caption(f"기본 모델이 붐벼서 예비 모델({_short(result['model'])})로 인식했어요.")
+        st.caption(f"기본 모델이 실패해서 예비 모델({_short(result['model'])})로 인식했어요.")
+    show_process(result.get("attempts") or [])
     if not result["ingredients"]:
         if not result["is_food_image"]:
             st.warning("냉장고나 식재료 사진이 아닌 것 같아요. 냉장고 안이 잘 보이게 다시 찍어 주세요.")

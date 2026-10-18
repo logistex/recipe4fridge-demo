@@ -82,7 +82,8 @@ def test_generate_shows_recipe_cards(monkeypatch):
     headings = [m.value for m in at.markdown if m.value.startswith("####")]
     assert headings == ["#### 달걀국", "#### 볶음밥"]
     assert any("추가로 필요: 밥" in m.value for m in at.markdown)
-    assert any("알레르기 재료가 들어 있음 1개" in c.value for c in at.caption)
+    partial = next(w.value for w in at.warning if "만들지 못하고" in w.value)  # 3개가 안 되면 숨기지 않고 알림
+    assert "3개 만들지 못하고 2개만" in partial and "알레르기 재료가 들어 있음 1개" in partial
     assert not any("](http" in m.value for m in at.markdown)  # 모델 글의 링크 문법은 이스케이프됨
 
 
@@ -131,11 +132,51 @@ def test_changed_preferences_prompt_regeneration(monkeypatch):
     assert any("조건이 바뀌었어요" in i.value for i in at.info)
 
 
-def test_empty_result_shows_hint(monkeypatch):
+def test_empty_result_is_shown_as_failure(monkeypatch):
     monkeypatch.setattr(core.recipe_gen, "generate_recipes", FakeGenerate(RecipeResult([], "m", 1, {"missing": 3})))
     at = open_recipes()
     button(at, "레시피 추천받기").click().run()
-    assert any("조건에 맞는 레시피를 찾지 못했어요" in w.value for w in at.warning)
+    err = next(e.value for e in at.error if "하나도 만들지 못했어요" in e.value)
+    assert "사야 할 재료가 너무 많음 3개" in err
+
+
+def test_failed_followup_request_is_disclosed(monkeypatch):
+    result = RecipeResult([recipe("달걀국", "tmp_a")], "m", 1, {"allergy": 2}, followup_error="AI 모델이 제한 시간 안에 응답하지 않았어요.")
+    monkeypatch.setattr(core.recipe_gen, "generate_recipes", FakeGenerate(result))
+    at = open_recipes()
+    button(at, "레시피 추천받기").click().run()
+    warning = next(w.value for w in at.warning if "만들지 못하고" in w.value)
+    assert "1개만" in warning and "다시 요청했지만 실패했어요" in warning
+
+
+def test_failure_shows_attempts_and_marks_previous_recipes(monkeypatch):
+    attempts = [
+        {"model": core.config.DEFAULT_TEXT_MODEL, "outcome": 429, "seconds": 0.5, "limit": 90},
+        {"model": core.config.DEFAULT_TEXT_MODEL, "outcome": "timeout", "seconds": 90.2, "limit": 90},
+    ]
+    fake = FakeGenerate(RecipeResult([recipe("달걀국", "tmp_a")], "m", 1), AppError("MODEL_TIMEOUT", attempts=attempts))
+    monkeypatch.setattr(core.recipe_gen, "generate_recipes", fake)
+    at = open_recipes()
+    button(at, "레시피 추천받기").click().run()
+    button(at, "다른 레시피 보기").click().run()
+
+    err = next(e.value for e in at.error if "❌" in e.value)
+    assert "다른 레시피를 가져오지 못했어요" in err and MESSAGES["MODEL_TIMEOUT"] in err
+    assert "AI 요청 2회" in err and "요청 한도 초과로 거절(429) 1회" in err and "90초 안에 응답 없음 1회" in err
+    assert any("이전에 추천받은 레시피" in w.value and "실패" in w.value for w in at.warning)
+    assert [m.value for m in at.markdown if m.value.startswith("####")] == ["#### 달걀국"]
+
+
+def test_success_after_failed_attempts_is_disclosed(monkeypatch):
+    attempts = [
+        {"model": core.config.DEFAULT_TEXT_MODEL, "outcome": 429, "seconds": 0.5, "limit": 90},
+        {"model": core.config.DEFAULT_TEXT_MODEL, "outcome": 200, "seconds": 20.0, "limit": 90},
+    ]
+    result = RecipeResult([recipe(t, f"tmp_{t}") for t in ("가", "나", "다")], "m", 1, attempts=attempts)
+    monkeypatch.setattr(core.recipe_gen, "generate_recipes", FakeGenerate(result))
+    at = open_recipes()
+    button(at, "레시피 추천받기").click().run()
+    assert any("AI 요청 2회 중 1회 실패한 뒤 결과를 받았어요" in c.value for c in at.caption)
 
 
 def test_model_error_is_shown(monkeypatch):

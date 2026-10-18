@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -57,6 +57,7 @@ class RecognitionResult:
     model: str
     elapsed_ms: int
     fallback_used: bool = False
+    attempts: list[dict] = field(default_factory=list)  # 성공하기까지 보낸 요청들 (실패한 시도 포함)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -226,35 +227,44 @@ def recognize_ingredients(
     def payload_for(m: str) -> dict:
         return build_payload(m, data_url, json_mode=supports_json(m))
 
+    attempts: list[dict] = []  # 화면에 "무엇을 시도했는지" 보여 주기 위한 요청 기록
     used_model = None
-    for attempt in range(2):  # 응답을 해석하지 못하면 1회 다시 요청한다
-        remaining = deadline_seconds - (time.monotonic() - start)
-        if remaining <= 0:
-            raise AppError("MODEL_TIMEOUT")
-        if used_model is None:
-            used_model, response = client.chat_with_fallback(
-                payload_for,
-                [model, *fallback_models],
-                deadline_seconds=remaining,
-                attempt_timeout=config.VISION_ATTEMPT_TIMEOUT_SECONDS,
-                fallback_attempt_timeout=config.FALLBACK_ATTEMPT_TIMEOUT_SECONDS,
-                on_retry=on_retry,
-                on_fallback=on_fallback,
-            )
-        else:  # 다시 요청할 때는 방금 응답한 모델에 바로 보낸다
-            timeout = (
-                config.VISION_ATTEMPT_TIMEOUT_SECONDS if used_model == model else config.FALLBACK_ATTEMPT_TIMEOUT_SECONDS
-            )
-            response = client.chat(
-                payload_for(used_model), deadline_seconds=remaining, retry_delays=(), attempt_timeout=timeout
-            )
-        try:
-            ingredients, is_food, notes = parse_result(extract_json(message_text(response)))
-            break
-        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-            log.warning("인식 응답 파싱 실패 (모델 %s, 시도 %d)", used_model, attempt + 1)
-    else:
-        raise AppError("PARSE_FAILED")
+    try:
+        for attempt in range(2):  # 응답을 해석하지 못하면 1회 다시 요청한다
+            remaining = deadline_seconds - (time.monotonic() - start)
+            if remaining <= 0:
+                raise AppError("MODEL_TIMEOUT")
+            if used_model is None:
+                used_model, response = client.chat_with_fallback(
+                    payload_for,
+                    [model, *fallback_models],
+                    deadline_seconds=remaining,
+                    attempt_timeout=config.VISION_ATTEMPT_TIMEOUT_SECONDS,
+                    fallback_attempt_timeout=config.FALLBACK_ATTEMPT_TIMEOUT_SECONDS,
+                    on_retry=on_retry,
+                    on_fallback=on_fallback,
+                    log=attempts,
+                )
+            else:  # 다시 요청할 때는 방금 응답한 모델에 바로 보낸다
+                timeout = (
+                    config.VISION_ATTEMPT_TIMEOUT_SECONDS if used_model == model else config.FALLBACK_ATTEMPT_TIMEOUT_SECONDS
+                )
+                response = client.chat(
+                    payload_for(used_model), deadline_seconds=remaining, retry_delays=(), attempt_timeout=timeout,
+                    log=attempts,
+                )
+            try:
+                ingredients, is_food, notes = parse_result(extract_json(message_text(response)))
+                break
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                log.warning("인식 응답 파싱 실패 (모델 %s, 시도 %d)", used_model, attempt + 1)
+                if attempts:
+                    attempts[-1]["outcome"] = "unreadable"
+        else:
+            raise AppError("PARSE_FAILED")
+    except AppError as e:
+        e.attempts = attempts
+        raise
 
     return RecognitionResult(
         ingredients=ingredients,
@@ -263,4 +273,5 @@ def recognize_ingredients(
         model=used_model,
         elapsed_ms=int((time.monotonic() - start) * 1000),
         fallback_used=used_model != model,
+        attempts=attempts,
     )

@@ -159,6 +159,34 @@ def test_non_food_image_shows_retake_message(monkeypatch, png_bytes):
     assert button(at, "이 재료로 레시피 찾기").disabled
 
 
+def test_failure_banner_lists_attempts(monkeypatch, png_bytes):
+    attempts = [
+        {"model": "primary/model:free", "outcome": 429, "seconds": 0.7, "limit": 60},
+        {"model": "primary/model:free", "outcome": 429, "seconds": 0.5, "limit": 60},
+        {"model": "fb/model:free", "outcome": "timeout", "seconds": 30.5, "limit": 30},
+    ]
+    fake = FakeRecognizer(error=AppError("ALL_MODELS_FAILED", attempts=attempts))
+    monkeypatch.setattr(core.vision, "recognize_ingredients", fake)
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+    err = next(e.value for e in at.error if "❌" in e.value)
+    assert "재료 인식에 실패했어요" in err and MESSAGES["ALL_MODELS_FAILED"] in err
+    assert "AI 요청 3회: 요청 한도 초과로 거절(429) 2회, 30초 안에 응답 없음 1회" in err
+    assert at.expander[0].label == "시도한 내용 자세히 보기"
+    details = at.expander[0].markdown[0].value
+    assert "1. 기본 모델 `model`" in details and "3. 예비 모델 `model` — 30초 안에 응답 없음 (30.5초)" in details
+
+
+def test_failure_on_new_photo_marks_previous_result(monkeypatch, png_bytes):
+    fake = FakeRecognizer(food_result())
+    monkeypatch.setattr(core.vision, "recognize_ingredients", fake)
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+    fake.error = AppError("MODEL_BUSY")
+    at.file_uploader[0].upload("other.png", make_image_bytes("PNG", color=(0, 0, 200)), "image/png").run()
+    button(at, "재료 인식").click().run()
+    assert any("재료 인식에 실패했어요" in e.value for e in at.error)
+    assert any("이전 사진에서 성공한 인식 결과" in w.value and "실패" in w.value for w in at.warning)
+
+
 def test_model_error_is_shown_and_button_reenabled(monkeypatch, png_bytes):
     fake = FakeRecognizer(error=AppError("MODEL_BUSY"))
     monkeypatch.setattr(core.vision, "recognize_ingredients", fake)

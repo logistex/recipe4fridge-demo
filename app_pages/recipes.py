@@ -9,6 +9,7 @@ from core.errors import MESSAGES, AppError
 from core.recipe_flow import input_key, request_recipes
 from core.recipe_gen import CUISINES, DIFFICULTIES, REJECT_REASONS, Preferences, generate_recipes
 from core.runtime import get_client, get_daily_limiter
+from core.ui import show_failure, show_process
 
 FRIDGE_PAGE = "app_pages/fridge.py"
 
@@ -106,7 +107,7 @@ if busy:
         with st.status("레시피를 고르는 중이에요 (30초~1분 걸릴 수 있어요)", expanded=True) as status:
 
             def on_retry(attempt: int, wait: int) -> None:
-                status.write(f"요청이 몰려 {wait}초 뒤 한 번 더 시도합니다.")
+                status.write(f"AI 모델이 일시적 오류(429·502·503)를 돌려줘서 {wait}초 뒤 한 번 더 시도합니다.")
 
             def generate(ings, p, ex):
                 return generate_recipes(
@@ -121,16 +122,21 @@ if busy:
                 state["shown_titles"] = exclude + [r["title"] for r in result["recipes"]]
                 state["recipe_basis"] = basis
                 state.pop("recipe_error", None)
-                status.update(label="레시피를 골랐어요", state="complete", expanded=False)
+                status.update(label="레시피 추천 완료", state="complete", expanded=False)
             except AppError as e:
-                state["recipe_error"] = e.message
-                status.update(label="레시피를 만들지 못했어요", state="error", expanded=False)
+                state["recipe_error"] = {"message": e.message, "attempts": e.attempts, "more": more, "basis": basis}
+                status.update(label="레시피 추천 실패", state="error", expanded=False)
     finally:
         state["recipe_pending"] = None
     st.rerun()
 
-if state.get("recipe_error"):
-    st.error(state["recipe_error"])
+# 실패는 숨기지 않는다. 지금 재료·조건으로 한 요청의 실패만 보여 준다.
+error = state.get("recipe_error")
+failed_now = bool(error and error["basis"] == basis)
+if failed_now:
+    show_failure(
+        "다른 레시피를 가져오지 못했어요" if error["more"] else "레시피 추천에 실패했어요", error
+    )
 
 # --- 결과 -------------------------------------------------------------------------
 
@@ -174,16 +180,26 @@ def render_recipe(r: dict) -> None:
 
 result = state.get("recipe_result")
 if result:
-    if state.get("recipe_basis") != basis:
+    if failed_now:
+        st.warning("아래는 이전에 추천받은 레시피예요. 방금 한 요청은 실패했어요.")
+    elif state.get("recipe_basis") != basis:
         st.info("재료나 조건이 바뀌었어요. '레시피 추천받기'를 눌러 새로 추천받으세요.")
     recipes = result["recipes"]
+    rejected = result.get("rejected") or {}
+    reasons = [f"{REJECT_REASONS[k]} {v}개" for k, v in rejected.items()]
+    detail = ("AI가 만든 레시피 중 뺀 것: " + ", ".join(reasons) + ".") if reasons else ""
+    if result.get("followup_error"):
+        detail += f" 모자란 레시피를 채우려고 다시 요청했지만 실패했어요: {result['followup_error']}"
     if not recipes:
-        st.warning("조건에 맞는 레시피를 찾지 못했어요. 추가로 사도 되는 재료, 조리 시간, 식이 조건을 조금 넓혀 보세요.")
-    rejected = {k: v for k, v in (result.get("rejected") or {}).items() if k != "invalid"}
-    if rejected:
-        st.caption(
-            "조건에 맞지 않아 뺀 레시피: " + ", ".join(f"{REJECT_REASONS[k]} {v}개" for k, v in rejected.items())
+        st.error(
+            "**❌ 조건에 맞는 레시피를 하나도 만들지 못했어요.**\n\n" + (detail + "\n\n" if detail else "")
+            + "추가로 사도 되는 재료, 조리 시간, 식이 조건을 조금 넓혀서 다시 시도해 보세요."
         )
+    elif len(recipes) < config.RECIPE_COUNT:
+        st.warning(f"**⚠️ 레시피를 {config.RECIPE_COUNT}개 만들지 못하고 {len(recipes)}개만 만들었어요.** {detail}")
+    elif reasons:
+        st.caption(detail)
+    show_process(result.get("attempts") or [])
     for recipe in recipes:
         render_recipe(recipe)
     st.caption("AI가 만든 레시피입니다. 알레르기와 재료 상태를 꼭 직접 확인하세요.")

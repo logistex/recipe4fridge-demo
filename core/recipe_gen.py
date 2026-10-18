@@ -72,6 +72,8 @@ class RecipeResult:
     model: str
     elapsed_ms: int
     rejected: dict[str, int] = field(default_factory=dict)
+    attempts: list[dict] = field(default_factory=list)  # 보낸 요청들 (실패한 시도 포함)
+    followup_error: str | None = None  # 모자라서 다시 요청했는데 실패했으면 그 오류 문구
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -315,6 +317,8 @@ def generate_recipes(
     rejected: Counter = Counter()
     parsed_any = False
     used_model = model
+    attempts: list[dict] = []
+    followup_error = None
     for attempt in range(2):
         need = config.RECIPE_COUNT - len(kept)
         remaining = deadline_seconds - (time.monotonic() - start)
@@ -327,10 +331,13 @@ def generate_recipes(
                 deadline_seconds=remaining,
                 on_retry=on_retry,
                 attempt_timeout=config.RECIPE_ATTEMPT_TIMEOUT_SECONDS,
+                log=attempts,
             )
-        except AppError:
-            if kept:  # 두 번째 요청이 실패해도 이미 고른 레시피는 보여 준다
+        except AppError as e:
+            if kept:  # 두 번째 요청이 실패해도 이미 고른 레시피는 보여 주되, 실패했다는 사실도 함께 알린다
+                followup_error = e.message
                 break
+            e.attempts = attempts
             raise
         used_model = response.get("model") or model
         finish = (response.get("choices") or [{}])[0].get("finish_reason")
@@ -340,6 +347,8 @@ def generate_recipes(
                 raise ValueError("recipes가 배열이 아님")
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             log.warning("레시피 응답 파싱 실패 (시도 %d, finish_reason=%s)", attempt + 1, finish)
+            if attempts:
+                attempts[-1]["outcome"] = "unreadable"
             continue
         parsed_any = True
         for raw in raw_recipes:
@@ -358,8 +367,10 @@ def generate_recipes(
         log.info("레시피 시도 %d: 통과 %d개, 제외 %s", attempt + 1, len(kept), dict(rejected))
 
     if not parsed_any:
-        raise AppError("PARSE_FAILED", "레시피를 만들지 못했어요. 다시 시도해 주세요.")
+        raise AppError("PARSE_FAILED", attempts=attempts)
     kept.sort(key=lambda r: r["usage_ratio"], reverse=True)
     for r in kept:
         r["id"] = "tmp_" + hashlib.sha1(r["title"].encode()).hexdigest()[:8]
-    return RecipeResult(kept, used_model, int((time.monotonic() - start) * 1000), dict(rejected))
+    return RecipeResult(
+        kept, used_model, int((time.monotonic() - start) * 1000), dict(rejected), attempts, followup_error
+    )

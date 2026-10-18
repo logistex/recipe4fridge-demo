@@ -185,12 +185,16 @@ class FakeClient:
         self.payloads.append(payload)
         return {"model": "provider-name", "choices": [{"message": {"content": self.contents.pop(0)}}]}
 
-    def chat(self, payload, *, deadline_seconds, on_retry=None, retry_delays=None, attempt_timeout=None):
+    def chat(self, payload, *, deadline_seconds, on_retry=None, retry_delays=None, attempt_timeout=None, log=None):
+        if log is not None:
+            log.append({"model": payload["model"], "outcome": 200, "seconds": 1.0, "limit": 30})
         return self._respond(payload)
 
-    def chat_with_fallback(self, build_payload, models, *, deadline_seconds, **kwargs):
+    def chat_with_fallback(self, build_payload, models, *, deadline_seconds, log=None, **kwargs):
         self.model_lists.append(list(models))
         model = self.answer_model or models[0]
+        if log is not None:
+            log.append({"model": model, "outcome": 200, "seconds": 1.0, "limit": 60})
         return model, self._respond(build_payload(model))
 
 
@@ -239,6 +243,19 @@ def test_parse_retry_goes_to_the_model_that_answered(png_bytes):
     assert len(client.model_lists) == 1  # 기본 모델부터 다시 시작하지 않음
     assert [p["model"] for p in client.payloads] == ["fb1", "fb1"]
     assert result.model == "fb1"
+
+
+def test_attempts_are_reported_on_success_and_unreadable_marked(png_bytes):
+    client = FakeClient(["엉망", VALID], answer_model="fb1")
+    result = recognize_ingredients(png_bytes, client=client, model="m", fallback_models=["fb1"])
+    assert [a["outcome"] for a in result.attempts] == ["unreadable", 200]
+
+
+def test_attempts_are_attached_to_failure(png_bytes):
+    client = FakeClient(["엉망", "또 엉망"])
+    with pytest.raises(AppError) as exc:
+        recognize_ingredients(png_bytes, client=client, model="m")
+    assert [a["outcome"] for a in exc.value.attempts] == ["unreadable", "unreadable"]
 
 
 def test_recognize_rejects_invalid_image_before_calling_model():

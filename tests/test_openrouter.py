@@ -43,6 +43,13 @@ def requested_models(calls):
 
 # --- chat: 같은 모델 재시도 ------------------------------------------------------
 
+def test_log_records_success_and_retry():
+    log = []
+    client, _, _ = make_client([httpx.Response(429, json={}), httpx.Response(200, json=OK_BODY)])
+    client.chat({"model": "m"}, deadline_seconds=90, log=log)
+    assert [a["outcome"] for a in log] == [429, 200]
+
+
 def test_success_sends_auth_header():
     client, calls, _ = make_client([httpx.Response(200, json=OK_BODY)])
     assert client.chat({"model": "m"}, deadline_seconds=90) == OK_BODY
@@ -190,12 +197,18 @@ def test_each_fallback_is_tried_once_and_any_error_moves_on():
     assert clock.now == 10  # 기다린 것은 기본 모델 재시도 한 번뿐
 
 
-def test_all_models_busy_gives_model_busy():
-    client, calls, _ = make_client([httpx.Response(429, json={})] * 4)
+def test_all_models_failing_is_reported_as_such_with_each_attempt():
+    log = []
+    client, calls, _ = make_client(
+        [httpx.Response(429, json={}), httpx.Response(429, json={}), httpx.Response(502, json={}), httpx.ReadTimeout("x")]
+    )
     with pytest.raises(AppError) as exc:
-        client.chat_with_fallback(build, ["primary", "fb1", "fb2"], deadline_seconds=120)
-    assert exc.value.code == "MODEL_BUSY"
-    assert len(calls) == 4
+        client.chat_with_fallback(build, ["primary", "fb1", "fb2"], deadline_seconds=120, log=log)
+    assert exc.value.code == "ALL_MODELS_FAILED"  # 마지막 시도(시간 초과)만 보고 원인을 단정하지 않음
+    assert [(a["model"], a["outcome"]) for a in log] == [
+        ("primary", 429), ("primary", 429), ("fb1", 502), ("fb2", "timeout"),
+    ]
+    assert all("seconds" in a and "limit" in a for a in log)
 
 
 def test_primary_success_does_not_touch_fallbacks():

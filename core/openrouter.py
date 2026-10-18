@@ -16,7 +16,7 @@ RETRYABLE_STATUS = {429, 502, 503}
 # 기본 모델이 이 오류로 끝나면 예비 모델로 넘어간다 (API 키 문제 같은 CONFIG_ERROR는 넘어가도 소용없다)
 FALLBACK_ON = {"MODEL_BUSY", "UPSTREAM_ERROR", "MODEL_TIMEOUT"}
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 RetryCallback = Callable[[int, int], None]
 FallbackCallback = Callable[[str], None]
@@ -54,8 +54,13 @@ class OpenRouterClient:
         on_retry: RetryCallback | None = None,
         retry_delays: tuple[int, ...] | None = None,
         attempt_timeout: float | None = None,
+        log: list | None = None,
     ) -> dict:
-        """요청을 보내고 응답 JSON을 돌려준다. 일시적 오류면 retry_delays만큼 기다렸다 다시 보낸다."""
+        """요청을 보내고 응답 JSON을 돌려준다. 일시적 오류면 retry_delays만큼 기다렸다 다시 보낸다.
+
+        log를 주면 요청마다 {"model", "outcome", "seconds", "limit"}를 덧붙인다(화면에 시도 내역을 보여 주기 위함).
+        outcome은 HTTP 상태 코드(200, 429 …)이거나 "timeout", "network"다.
+        """
         delays = self._retry_delays if retry_delays is None else retry_delays
         per_attempt = min(self._request_timeout, attempt_timeout or self._request_timeout)
         start = self._clock()
@@ -64,8 +69,8 @@ class OpenRouterClient:
             remaining = deadline_seconds - (self._clock() - start)
             if remaining <= 0:
                 break
-            status, data = self._post(payload, limit=min(remaining, per_attempt))
-            log.info("OpenRouter model=%s status=%s attempt=%d", payload.get("model"), status, attempt + 1)
+            status, data = self._logged_post(payload, min(remaining, per_attempt), log)
+            logger.info("OpenRouter model=%s status=%s attempt=%d", payload.get("model"), status, attempt + 1)
             if status == 200:
                 return data
             last_status = status
@@ -87,6 +92,21 @@ class OpenRouterClient:
             raise AppError("CONFIG_ERROR")
         raise AppError("UPSTREAM_ERROR")
 
+    def _logged_post(self, payload: dict, limit: float, log: list | None) -> tuple[int, dict]:
+        start = self._clock()
+        entry = {"model": payload.get("model"), "limit": round(limit)}
+        try:
+            status, data = self._post(payload, limit=limit)
+            entry["outcome"] = status
+            return status, data
+        except AppError as e:
+            entry["outcome"] = "timeout" if e.code == "MODEL_TIMEOUT" else "network"
+            raise
+        finally:
+            entry["seconds"] = round(self._clock() - start, 1)
+            if log is not None:
+                log.append(entry)
+
     def _post(self, payload: dict, *, limit: float) -> tuple[int, dict]:
         """요청 하나를 limit초 안에 끝낸다.
 
@@ -100,13 +120,13 @@ class OpenRouterClient:
                 for chunk in resp.iter_bytes():
                     body.extend(chunk)
                     if self._clock() - start > limit:
-                        log.warning("OpenRouter 응답 시간 초과: model=%s %.0f초", payload.get("model"), limit)
+                        logger.warning("OpenRouter 응답 시간 초과: model=%s %.0f초", payload.get("model"), limit)
                         raise AppError("MODEL_TIMEOUT")
                 status_code = resp.status_code
         except httpx.TimeoutException:
             raise AppError("MODEL_TIMEOUT") from None
         except httpx.HTTPError as e:
-            log.warning("OpenRouter 연결 실패: %s", type(e).__name__)
+            logger.warning("OpenRouter 연결 실패: %s", type(e).__name__)
             raise AppError("UPSTREAM_ERROR") from None
         return _status_and_body(status_code, bytes(body))
 
@@ -120,6 +140,7 @@ class OpenRouterClient:
         fallback_attempt_timeout: float | None = None,
         on_retry: RetryCallback | None = None,
         on_fallback: FallbackCallback | None = None,
+        log: list | None = None,
     ) -> tuple[str, dict]:
         """첫 모델은 재시도 정책대로, 예비 모델은 한 번씩만 시도한다. (응답한 모델, 응답)을 돌려준다.
 
@@ -133,6 +154,7 @@ class OpenRouterClient:
                 deadline_seconds=deadline_seconds,
                 on_retry=on_retry,
                 attempt_timeout=attempt_timeout,
+                log=log,
             )
         except AppError as e:
             if e.code not in FALLBACK_ON or not fallbacks:
@@ -143,7 +165,7 @@ class OpenRouterClient:
             remaining = deadline_seconds - (self._clock() - start)
             if remaining <= 0:
                 break
-            log.info("예비 모델로 전환: %s", model)
+            logger.info("예비 모델로 전환: %s", model)
             if on_fallback:
                 on_fallback(model)
             try:
@@ -152,10 +174,12 @@ class OpenRouterClient:
                     deadline_seconds=remaining,
                     retry_delays=(),
                     attempt_timeout=fallback_attempt_timeout or attempt_timeout,
+                    log=log,
                 )
             except AppError as e:  # 예비 모델은 어떤 이유로 실패하든 다음 모델로 넘어간다
                 last_error = e
-        raise AppError("MODEL_TIMEOUT" if last_error.code == "MODEL_TIMEOUT" else "MODEL_BUSY")
+        # 마지막 시도만 보고 원인을 정하면 틀리기 쉽다(예: 502인데 "요청이 몰렸다"). 모두 실패했다고 그대로 알린다.
+        raise AppError("ALL_MODELS_FAILED")
 
     def free_vision_models(self) -> dict[str, set[str]]:
         """이미지를 받는 무료 모델과 각 모델이 지원하는 파라미터. 모델 목록은 키 없이 공개된 API다."""

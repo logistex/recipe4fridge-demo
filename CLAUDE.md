@@ -40,6 +40,7 @@ python scripts/test_openrouter.py [text|image]          # 실제 API 동작 확�
   - 텍스트 모델(Nemotron)은 `reasoning: {"enabled": false}`로 부릅니다. 추론을 켜면 90초를 넘기고, 끄면 21~35초입니다. 출력은 `json_schema`로 강제하지만 서버에서 다시 검증합니다.
   - 모델이 준 보유 여부·알레르기 준수는 믿지 않습니다. `pantry.py`가 대표 이름(손질법 제거 + 동의어)으로 보유 여부를 다시 계산하고, `recipe_gen.reject_reason()`이 알레르기(파생 식품 포함)·채식·추가 구매 수·시간·요리 종류·중복으로 걸러 냅니다. 모자라면 모자란 수만큼 한 번 더 요청합니다.
   - 생성 결과는 `state["recipe_result"]`, 3단계 저장용 입력은 `state["recipe_input"]`에 둡니다. 조건 위젯은 `pref_*` key로 세션에 남습니다.
+- **실패는 숨기지 않습니다**(`core/ui.py`). `OpenRouterClient.chat()`과 `chat_with_fallback()`에 `log=[]`를 주면 요청마다 `{model, outcome, seconds, limit}`가 쌓이고, 인식·레시피 함수는 이것을 결과(`attempts`)와 `AppError.attempts`에 담습니다. 화면은 `show_failure()`로 "❌ …에 실패했어요"와 시도 내역을, `show_process()`로 성공 전에 실패한 요청을 보여 줍니다. 여러 모델이 모두 실패하면 마지막 시도로 원인을 단정하지 않고 `ALL_MODELS_FAILED`를 냅니다. 실패 뒤 남아 있는 이전 결과에는 "이전 결과"라고 표시하고, 레시피가 3개보다 적으면 부분 실패로 알립니다.
 - 페이지 이동은 `st.switch_page("app_pages/...")`입니다. 그래서 화면 테스트는 페이지 파일이 아니라 `streamlit_app.py`를 `AppTest`로 띄우고, 2단계는 `at.switch_page(...)`로 엽니다.
 - `tests/test_fridge_page.py`는 `AppTest`로 화면을 돌리며, `core.vision.recognize_ingredients`와 `core.runtime.vision_model_plan`(네트워크 호출)을 monkeypatch합니다. 페이지가 매 실행마다 `from core... import ...`를 다시 하기 때문에 이 방식이 통합니다.
 - `core/` 파일을 고친 뒤 실행 중인 Streamlit 서버는 예전 모듈을 그대로 들고 있을 수 있습니다(ImportError 등). 서버를 다시 시작합니다.
