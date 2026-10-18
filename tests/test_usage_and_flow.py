@@ -82,6 +82,12 @@ def test_editor_rows_mark_low_confidence():
     assert rows == [{"name": "달걀", "quantity": 1, "unit": "개", "category": "기타", "check": "⚠ 확인 필요"}]
 
 
+def test_editor_rows_mark_suspicious_names_separately():
+    result = fake_result(("달strand",)).to_dict()
+    result["ingredients"][0]["name_suspect"] = True
+    assert to_editor_rows(result)[0]["check"] == "⚠ 이름 확인"
+
+
 def test_confirmed_rows_skip_blank_names_and_clean_values():
     rows = [
         {"name": " 달걀 ", "quantity": 6.0, "unit": "개", "category": "유제품·달걀", "check": ""},

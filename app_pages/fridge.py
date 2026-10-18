@@ -139,7 +139,10 @@ if recognition:
             st.warning("식재료를 찾지 못했어요. 밝은 곳에서 냉장고 안이 잘 보이게 다시 찍어 주세요.")
         st.caption("아래 표에 재료를 직접 추가할 수도 있어요.")
 
-    low = [ing["name"] for ing in result["ingredients"] if ing["confidence"] == "low"]
+    suspect = [ing["name"] for ing in result["ingredients"] if ing.get("name_suspect")]
+    low = [ing["name"] for ing in result["ingredients"] if ing["confidence"] == "low" and not ing.get("name_suspect")]
+    if suspect:
+        st.warning("재료 이름이 잘못 인식된 것 같아요. 표에서 바르게 고쳐 주세요: " + ", ".join(suspect))
     if low:
         st.warning("다음 재료는 사진에서 확실하지 않아요. 맞는지 확인해 주세요: " + ", ".join(low))
     if result.get("notes"):

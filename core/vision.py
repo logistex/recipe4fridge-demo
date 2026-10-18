@@ -13,6 +13,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from core import config
 from core.errors import AppError
+from core.ingredient_names import category_for, is_suspicious_name
 from core.openrouter import FallbackCallback, OpenRouterClient, RetryCallback
 
 CATEGORIES = ("채소", "과일", "육류", "해산물", "유제품·달걀", "곡물·면", "양념·소스", "반찬·가공식품", "음료", "기타")
@@ -45,6 +46,7 @@ class Ingredient:
     unit: str | None
     category: str
     confidence: str
+    name_suspect: bool = False  # 재료명에 다른 문자가 섞여 사용자가 확인해야 함
 
 
 @dataclass
@@ -160,7 +162,7 @@ def _to_quantity(value) -> int | float | None:
 
 
 def normalize_ingredients(items) -> list[Ingredient]:
-    """공백 정리, 같은 재료 합치기, 허용되지 않은 값 바로잡기."""
+    """공백 정리, 이름 검사, 사전으로 분류 바로잡기, 같은 재료 합치기, 허용되지 않은 값 바로잡기."""
     if not isinstance(items, list):
         raise ValueError("ingredients가 배열이 아님")
     rank = {c: i for i, c in enumerate(CONFIDENCES)}
@@ -171,9 +173,14 @@ def normalize_ingredients(items) -> list[Ingredient]:
         name = _clean_text(item.get("name"), 30)
         if not name:
             continue
-        category = item.get("category") if item.get("category") in CATEGORIES else "기타"
+        category = category_for(name) or (item.get("category") if item.get("category") in CATEGORIES else "기타")
         confidence = item.get("confidence") if item.get("confidence") in CONFIDENCES else "low"
-        ing = Ingredient(name, _to_quantity(item.get("quantity")), _clean_text(item.get("unit"), 10), category, confidence)
+        suspect = is_suspicious_name(name)
+        if suspect:
+            confidence = "low"
+        ing = Ingredient(
+            name, _to_quantity(item.get("quantity")), _clean_text(item.get("unit"), 10), category, confidence, suspect
+        )
 
         key = name.replace(" ", "")
         prev = merged.get(key)
@@ -257,11 +264,17 @@ def recognize_ingredients(
                 [model, *fallback_models],
                 deadline_seconds=remaining,
                 attempt_timeout=config.VISION_ATTEMPT_TIMEOUT_SECONDS,
+                fallback_attempt_timeout=config.FALLBACK_ATTEMPT_TIMEOUT_SECONDS,
                 on_retry=on_retry,
                 on_fallback=on_fallback,
             )
         else:  # 다시 요청할 때는 방금 응답한 모델에 바로 보낸다
-            response = client.chat(payload_for(used_model), deadline_seconds=remaining, retry_delays=())
+            timeout = (
+                config.VISION_ATTEMPT_TIMEOUT_SECONDS if used_model == model else config.FALLBACK_ATTEMPT_TIMEOUT_SECONDS
+            )
+            response = client.chat(
+                payload_for(used_model), deadline_seconds=remaining, retry_delays=(), attempt_timeout=timeout
+            )
         try:
             ingredients, is_food, notes = parse_result(extract_json(_message_text(response)))
             break

@@ -1,5 +1,6 @@
 """OpenRouter chat completions 클라이언트 (재시도, 예비 모델 전환, 전체 제한 시간, 오류 변환)."""
 
+import json
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -63,15 +64,7 @@ class OpenRouterClient:
             remaining = deadline_seconds - (self._clock() - start)
             if remaining <= 0:
                 break
-            try:
-                resp = self._http.post(API_URL, json=payload, timeout=min(remaining, per_attempt))
-            except httpx.TimeoutException:
-                raise AppError("MODEL_TIMEOUT") from None
-            except httpx.HTTPError as e:
-                log.warning("OpenRouter 연결 실패: %s", type(e).__name__)
-                raise AppError("UPSTREAM_ERROR") from None
-
-            status, data = _status_and_body(resp)
+            status, data = self._post(payload, limit=min(remaining, per_attempt))
             log.info("OpenRouter model=%s status=%s attempt=%d", payload.get("model"), status, attempt + 1)
             if status == 200:
                 return data
@@ -94,6 +87,29 @@ class OpenRouterClient:
             raise AppError("CONFIG_ERROR")
         raise AppError("UPSTREAM_ERROR")
 
+    def _post(self, payload: dict, *, limit: float) -> tuple[int, dict]:
+        """요청 하나를 limit초 안에 끝낸다.
+
+        OpenRouter는 처리하는 동안 연결 유지용 공백을 조금씩 보내므로, httpx의 읽기 제한 시간은
+        계속 다시 시작되어 전체 시간을 막지 못한다. 그래서 응답을 조각으로 받으면서 경과 시간을 직접 잰다.
+        """
+        start = self._clock()
+        body = bytearray()
+        try:
+            with self._http.stream("POST", API_URL, json=payload, timeout=limit) as resp:
+                for chunk in resp.iter_bytes():
+                    body.extend(chunk)
+                    if self._clock() - start > limit:
+                        log.warning("OpenRouter 응답 시간 초과: model=%s %.0f초", payload.get("model"), limit)
+                        raise AppError("MODEL_TIMEOUT")
+                status_code = resp.status_code
+        except httpx.TimeoutException:
+            raise AppError("MODEL_TIMEOUT") from None
+        except httpx.HTTPError as e:
+            log.warning("OpenRouter 연결 실패: %s", type(e).__name__)
+            raise AppError("UPSTREAM_ERROR") from None
+        return _status_and_body(status_code, bytes(body))
+
     def chat_with_fallback(
         self,
         build_payload: Callable[[str], dict],
@@ -101,10 +117,14 @@ class OpenRouterClient:
         *,
         deadline_seconds: float,
         attempt_timeout: float | None = None,
+        fallback_attempt_timeout: float | None = None,
         on_retry: RetryCallback | None = None,
         on_fallback: FallbackCallback | None = None,
     ) -> tuple[str, dict]:
-        """첫 모델은 재시도 정책대로, 예비 모델은 한 번씩만 시도한다. (응답한 모델, 응답)을 돌려준다."""
+        """첫 모델은 재시도 정책대로, 예비 모델은 한 번씩만 시도한다. (응답한 모델, 응답)을 돌려준다.
+
+        예비 모델 요청에는 fallback_attempt_timeout(없으면 attempt_timeout)을 적용한다.
+        """
         start = self._clock()
         primary, *fallbacks = models
         try:
@@ -128,7 +148,10 @@ class OpenRouterClient:
                 on_fallback(model)
             try:
                 return model, self.chat(
-                    build_payload(model), deadline_seconds=remaining, retry_delays=(), attempt_timeout=attempt_timeout
+                    build_payload(model),
+                    deadline_seconds=remaining,
+                    retry_delays=(),
+                    attempt_timeout=fallback_attempt_timeout or attempt_timeout,
                 )
             except AppError as e:  # 예비 모델은 어떤 이유로 실패하든 다음 모델로 넘어간다
                 last_error = e
@@ -146,15 +169,14 @@ class OpenRouterClient:
         return models
 
 
-def _status_and_body(resp: httpx.Response) -> tuple[int, dict]:
+def _status_and_body(status: int, body: bytes) -> tuple[int, dict]:
     """OpenRouter는 HTTP 200 본문에 error 객체를 담아 보내기도 하므로, 그 코드를 상태로 쓴다."""
     try:
-        data = resp.json()
+        data = json.loads(body)  # 앞쪽의 연결 유지용 공백은 json이 알아서 건너뛴다
     except ValueError:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    status = resp.status_code
     error = data.get("error")
     if status == 200 and isinstance(error, dict):
         code = error.get("code")

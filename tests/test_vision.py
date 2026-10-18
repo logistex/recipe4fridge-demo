@@ -63,7 +63,8 @@ def test_normalize_fixes_invalid_values():
     result = {i.name: i for i in normalize_ingredients(items)}
     assert set(result) == {"대파", "우유", "버터", "물"}
     assert result["대파"].quantity is None and result["대파"].unit is None
-    assert result["대파"].category == "기타" and result["대파"].confidence == "low"
+    assert result["대파"].category == "채소"  # 잘못된 분류("야채")는 사전 값으로 바로잡힘
+    assert result["대파"].confidence == "low"
     assert result["우유"].quantity == 2
     assert result["버터"].quantity is None
     assert result["물"].quantity is None

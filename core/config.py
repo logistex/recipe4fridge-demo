@@ -12,15 +12,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_VISION_MODEL = "google/gemma-4-26b-a4b-it:free"
 DEFAULT_TEXT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
-# 기본 모델이 429로 막혔을 때 차례로 쓰는 무료 비전 모델. 덜 붐빌 모델을 앞에 둔다.
-# OpenRouter API는 모델별 인기(사용량)를 제공하지 않으므로, 2026-10-18 실제 호출 결과로 골랐다.
-# - Gemma 4 31B는 기본 모델과 같은 Google 공유 한도를 써서 제외
-# - Inkling 계열은 에이전트 도구 전용(403)이라 제외
-# - Nemotron 3.5 Super VL은 사용량이 매우 많은 인기 모델이라 마지막에 둔다
+# 기본 모델이 429로 막혔을 때 차례로 쓰는 무료 비전 모델. 2026-10-18 실제 호출 결과로 골랐다.
+# - Nemotron 3.5 Super VL: 4.6초 응답, JSON 형식 정확 → 첫 번째 (인기 모델이지만 속도·품질 우선)
+# - dots-3-note-preview: 동작하지만 실제 사진에서 50초 걸리고 재료명이 깨지거나("달strand") 형식을 어긴 적이 있음
+# - Nemotron Nano Omni: 확인 시점에 NVIDIA 쪽 처리량이 차 있었음
+# 제외: Gemma 4 31B(기본 모델과 같은 Google 공유 한도), Inkling 계열(에이전트 도구 전용, 403)
 DEFAULT_FALLBACK_VISION_MODELS = (
+    "nvidia/nemotron-3.5-super-vl:free",
     "dots-studio/dots-3-note-preview:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "nvidia/nemotron-3.5-super-vl:free",
 )
 
 MAX_UPLOAD_MB = 10
@@ -33,7 +33,8 @@ CAMERA_RESOLUTION = "720p"
 
 RETRY_DELAYS = (10,)  # 429 등 일시적 오류면 같은 모델로 한 번 더 시도
 REQUEST_TIMEOUT_SECONDS = 180
-VISION_ATTEMPT_TIMEOUT_SECONDS = 60
+VISION_ATTEMPT_TIMEOUT_SECONDS = 60  # 기본 모델 요청 하나
+FALLBACK_ATTEMPT_TIMEOUT_SECONDS = 30  # 예비 모델 요청 하나. 느린 모델은 빨리 건너뛴다
 VISION_DEADLINE_SECONDS = 120
 
 SESSION_REQUESTS_PER_MINUTE = 3

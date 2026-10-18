@@ -43,6 +43,12 @@ def request_recognition(
     return state["recognition"]
 
 
+def check_label(ing: dict) -> str:
+    if ing.get("name_suspect"):
+        return "⚠ 이름 확인"
+    return "⚠ 확인 필요" if ing["confidence"] == "low" else ""
+
+
 def to_editor_rows(result: dict) -> list[dict]:
     return [
         {
@@ -50,7 +56,7 @@ def to_editor_rows(result: dict) -> list[dict]:
             "quantity": ing["quantity"],
             "unit": ing["unit"],
             "category": ing["category"],
-            "check": "⚠ 확인 필요" if ing["confidence"] == "low" else "",
+            "check": check_label(ing),
         }
         for ing in result["ingredients"]
     ]

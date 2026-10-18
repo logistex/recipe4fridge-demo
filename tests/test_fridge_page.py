@@ -138,6 +138,16 @@ def test_recognizer_gets_fallback_models_and_result_mentions_fallback(monkeypatc
     assert any("예비 모델(model)" in c.value for c in at.caption)
 
 
+def test_suspicious_name_gets_its_own_warning(monkeypatch, png_bytes):
+    result = food_result()
+    result.ingredients.append(Ingredient("달strand", 2, "개", "기타", "low", name_suspect=True))
+    monkeypatch.setattr(core.vision, "recognize_ingredients", FakeRecognizer(result))
+    at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
+    warnings = [w.value for w in at.warning]
+    assert any("이름이 잘못 인식" in w and "달strand" in w for w in warnings)
+    assert not any("확실하지 않아요" in w and "달strand" in w for w in warnings)
+
+
 def test_missing_api_key_disables_recognition(monkeypatch, png_bytes):
     monkeypatch.setattr(core.config, "get_api_key", lambda: None)
     at = AppTest.from_file(PAGE, default_timeout=15).run()

@@ -127,6 +127,53 @@ def test_falls_back_after_one_retry_on_429():
     assert switched == ["fb1"]
 
 
+def test_fallback_requests_use_shorter_timeout():
+    client, calls, _ = make_client([httpx.Response(429, json={})] * 2 + [httpx.Response(200, json=OK_BODY)])
+    client.chat_with_fallback(
+        build, ["primary", "fb1"], deadline_seconds=120, attempt_timeout=60, fallback_attempt_timeout=30
+    )
+    read_timeouts = [c.extensions["timeout"]["read"] for c in calls]
+    assert read_timeouts == [60, 60, 30]
+
+
+def keepalive_response(clock, seconds_per_chunk, chunks, final=OK_BODY):
+    """OpenRouter처럼 처리 중에 공백을 조금씩 보내다가 마지막에 본문을 보내는 응답."""
+
+    def body():
+        for _ in range(chunks):
+            clock.now += seconds_per_chunk
+            yield b" "
+        yield json.dumps(final).encode()
+
+    return httpx.Response(200, content=body())
+
+
+def test_keepalive_whitespace_is_ignored_when_fast_enough():
+    clock = FakeClock()
+    client, _, _ = make_client([keepalive_response(clock, 5, 3)], clock=clock)
+    assert client.chat({"model": "m"}, deadline_seconds=120, attempt_timeout=30) == OK_BODY
+
+
+def test_slow_keepalive_stream_is_cut_at_attempt_timeout():
+    # 공백이 10초마다 와서 httpx 읽기 제한에는 걸리지 않지만, 전체로는 30초를 넘는다
+    clock = FakeClock()
+    client, _, _ = make_client([keepalive_response(clock, 10, 10)], clock=clock)
+    with pytest.raises(AppError) as exc:
+        client.chat({"model": "m"}, deadline_seconds=120, attempt_timeout=30)
+    assert exc.value.code == "MODEL_TIMEOUT"
+    assert clock.now <= 40
+
+
+def test_slow_fallback_is_skipped_for_the_next_one():
+    clock = FakeClock()
+    responses = [httpx.Response(429, json={})] * 2 + [keepalive_response(clock, 10, 10), httpx.Response(200, json=OK_BODY)]
+    client, calls, _ = make_client(responses, clock=clock)
+    model, _ = client.chat_with_fallback(
+        build, ["primary", "slow", "fast"], deadline_seconds=120, attempt_timeout=60, fallback_attempt_timeout=30
+    )
+    assert model == "fast"
+
+
 def test_each_fallback_is_tried_once_and_any_error_moves_on():
     client, calls, clock = make_client(
         [
