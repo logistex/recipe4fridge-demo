@@ -59,7 +59,13 @@ scripts/              OpenRouter API 동작 확인 스크립트
 .venv/Scripts/python -m pytest
 ```
 
-테스트는 모델 호출을 가짜로 바꿔서 실행하므로 무료 사용량을 쓰지 않습니다. 실제 API 동작만 따로 확인하려면 `python scripts/test_openrouter.py`를 실행합니다.
+테스트는 모델 호출을 가짜로 바꿔서 실행하므로 무료 사용량을 쓰지 않습니다.
+
+실제 API로 1·2단계를 점검하려면 아래를 실행합니다(Windows, 무료 한도 약 2~7회 사용). 정답을 아는 테스트 사진으로 인식률을 재고, 레시피가 알레르기·한식·30분·추가 구매 조건을 지키는지 항목별로 보고합니다.
+
+```bash
+.venv/Scripts/python scripts/live_check.py
+```
 
 ## Streamlit Community Cloud 배포
 

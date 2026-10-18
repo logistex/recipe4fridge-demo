@@ -49,3 +49,20 @@ python scripts/test_openrouter.py [text|image]          # 실제 API 동작 확�
 - 키는 `core/config.get_setting()`이 `st.secrets` → 환경 변수 → 프로젝트 루트 `.env` 순서로 찾습니다. 로컬에서는 `.env`, Community Cloud에서는 앱 Secrets를 씁니다.
 - `.env`의 값을 읽어서 출력하지 않습니다. 확인이 필요할 때는 길이나 접두사(`sk-or-v1-`)만 봅니다. 새 비밀 값을 추가하면 `.env.example`과 `.streamlit/secrets.toml.example`에 자리표시자를 넣습니다.
 - `.gitignore`가 `.env`, `.env.*`, `.streamlit/secrets.toml`을 제외합니다. `.git/hooks/pre-commit` 훅은 `.env` 파일이나 `sk-or-v1-` 형식의 키가 스테이징되면 커밋을 막습니다. 이 훅은 git이 추적하지 않으므로, 저장소를 새로 clone하면 다시 설치해야 합니다.
+
+## 실행 시 확인 사항
+
+앱은 OpenRouter API로 실제 AI 모델을 불러 냉장고 사진의 식재료를 인식하고(1단계) 레시피를 생성합니다(2단계). 실제 모델을 실행했으면 **매번** 아래를 점검해서 보고합니다.
+
+- **API 동작**: 응답한 모델(기본/예비), 시도별 결과(200·429·502·시간 초과), 재시도와 예비 모델 전환 여부, 소요 시간
+- **결과 품질**: JSON 해석 성공 여부, 재료명 깨짐("⚠ 이름 확인"), 분류, 정답을 아는 사진이면 인식률, 레시피의 알레르기·식이·시간·요리 종류·추가 구매 조건 준수, 분량 단위
+- **실패했을 때**: 원인(예: Gemma 공유 한도 429, 예비 모델 30초 초과, 하루 한도)과 사용자에게 보인 안내 문구
+
+점검 방법:
+
+```bash
+.venv/Scripts/python scripts/live_check.py          # 1·2단계를 실제 API로 점검하고 항목별로 보고 (무료 한도 약 2~7회 사용)
+```
+
+- 앱 화면에서 실행했다면 서버 로그의 `core.openrouter`(모델·상태·시도 횟수), `core.recipe_gen`(통과·제외 수) 줄로 확인합니다.
+- 무료 한도(하루 50회, UTC 자정 초기화)를 지키기 위해 실제 호출은 점검이 필요할 때만 하고, 코드 검증은 가짜 클라이언트 테스트(`pytest`)로 합니다.
