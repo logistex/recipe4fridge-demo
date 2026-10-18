@@ -226,4 +226,4 @@ if recognition:
     count = len(state["confirmed_ingredients"])
     st.caption(f"확정한 재료 {count}개 · 이름과 수량을 바로 고치고, 휴지통 단추로 지울 수 있어요.")
     if st.button("이 재료로 레시피 찾기", type="primary", disabled=count == 0, width="stretch"):
-        st.info("레시피 추천은 다음 단계에서 연결됩니다.")
+        st.switch_page("app_pages/recipes.py")

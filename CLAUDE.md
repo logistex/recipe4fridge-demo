@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 냉장고 사진에서 식재료를 인식하고 레시피를 추천하는 Streamlit 앱입니다. OpenRouter의 무료 모델을 쓰고, Streamlit Community Cloud에 무료로 배포합니다. **모든 구성이 무료여야 한다**는 조건이 있습니다.
 
-- 기획은 `docs/PRD_step1.md`(식재료 인식, 구현 완료), `PRD_step2.md`(레시피 생성), `PRD_step3.md`(프로필과 저장: `st.login` Google OIDC + Neon Postgres)입니다. 구현은 이 순서를 따르며, 각 PRD에 데이터 형식, 화면 구성, 수용 기준이 있습니다.
+- 기획은 `docs/PRD_step1.md`(식재료 인식, 구현 완료), `PRD_step2.md`(레시피 생성, 구현 완료), `PRD_step3.md`(프로필과 저장: `st.login` Google OIDC + Neon Postgres)입니다. 구현은 이 순서를 따르며, 각 PRD에 데이터 형식, 화면 구성, 수용 기준이 있습니다.
 - OpenRouter 무료 모델은 계정 전체에 하루 50회 한도가 있습니다. 실제 API 호출은 꼭 필요할 때만 하고, 테스트는 가짜 클라이언트로 합니다.
 
 ## 명령어
@@ -36,6 +36,11 @@ python scripts/test_openrouter.py [text|image]          # 실제 API 동작 확�
 - Streamlit은 위젯을 조작할 때마다 스크립트 전체를 다시 실행합니다. 그래서 모델 호출은 버튼의 `on_click`으로 `pending` 플래그를 세운 실행에서만 일어나고, 끝나면 `st.rerun()`합니다. 결과는 `st.session_state`에 둡니다. 2단계 이후의 모델 호출도 같은 방식을 따릅니다.
 - 인식 결과는 `fridge_flow.init_rows()`로 `st.session_state["ing_rows"]`에 행으로 옮겨, 행마다 `name_{id}`, `qty_{id}`, `unit_{id}`, `del_{id}` 위젯을 한 줄에 그립니다(`id`는 `<사진 해시 8자>-<순번>`). 한 줄 배치는 `st.container(horizontal=True, wrap=False)`와 고정 너비로 합니다. `st.columns`는 휴대폰에서 줄이 넘치고, 수량 칸이 130px보다 좁으면 −/+ 단추가 사라집니다.
 - 2단계 입력은 `st.session_state["confirmed_ingredients"]`(`name`, `quantity`, `unit`, `category` 목록)입니다.
+- 2단계(`app_pages/recipes.py`, `core/recipe_gen.py`, `core/recipe_flow.py`, `core/pantry.py`):
+  - 텍스트 모델(Nemotron)은 `reasoning: {"enabled": false}`로 부릅니다. 추론을 켜면 90초를 넘기고, 끄면 21~35초입니다. 출력은 `json_schema`로 강제하지만 서버에서 다시 검증합니다.
+  - 모델이 준 보유 여부·알레르기 준수는 믿지 않습니다. `pantry.py`가 대표 이름(손질법 제거 + 동의어)으로 보유 여부를 다시 계산하고, `recipe_gen.reject_reason()`이 알레르기(파생 식품 포함)·채식·추가 구매 수·시간·요리 종류·중복으로 걸러 냅니다. 모자라면 모자란 수만큼 한 번 더 요청합니다.
+  - 생성 결과는 `state["recipe_result"]`, 3단계 저장용 입력은 `state["recipe_input"]`에 둡니다. 조건 위젯은 `pref_*` key로 세션에 남습니다.
+- 페이지 이동은 `st.switch_page("app_pages/...")`입니다. 그래서 화면 테스트는 페이지 파일이 아니라 `streamlit_app.py`를 `AppTest`로 띄우고, 2단계는 `at.switch_page(...)`로 엽니다.
 - `tests/test_fridge_page.py`는 `AppTest`로 화면을 돌리며, `core.vision.recognize_ingredients`와 `core.runtime.vision_model_plan`(네트워크 호출)을 monkeypatch합니다. 페이지가 매 실행마다 `from core... import ...`를 다시 하기 때문에 이 방식이 통합니다.
 - `core/` 파일을 고친 뒤 실행 중인 Streamlit 서버는 예전 모듈을 그대로 들고 있을 수 있습니다(ImportError 등). 서버를 다시 시작합니다.
 

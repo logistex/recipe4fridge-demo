@@ -2,7 +2,6 @@
 
 import base64
 import io
-import json
 import logging
 import re
 import time
@@ -13,6 +12,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from core import config
 from core.errors import AppError
+from core.jsonutil import extract_json, message_text
 from core.ingredient_names import category_for, is_suspicious_name
 from core.openrouter import FallbackCallback, OpenRouterClient, RetryCallback
 
@@ -121,26 +121,6 @@ def preprocess_image(data: bytes) -> bytes:
     return prepare_image(data).jpeg
 
 
-def extract_json(text: str) -> dict:
-    """코드 블록이나 설명 문장이 섞인 응답에서 JSON 객체를 꺼낸다."""
-    text = (text or "").strip()
-    candidates = [text]
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if fence:
-        candidates.append(fence.group(1))
-    start, end = text.find("{"), text.rfind("}")
-    if 0 <= start < end:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    raise ValueError("JSON 객체를 찾지 못함")
-
-
 def _clean_text(value, max_len: int) -> str | None:
     if not isinstance(value, str):
         return None
@@ -206,13 +186,6 @@ def parse_result(data: dict) -> tuple[list[Ingredient], bool, str | None]:
     return ingredients, is_food, _clean_text(data.get("notes"), 300)
 
 
-def _message_text(response: dict) -> str:
-    content = response["choices"][0]["message"].get("content")
-    if isinstance(content, list):  # 일부 제공자는 콘텐츠를 조각 배열로 보낸다
-        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return content or ""
-
-
 def build_payload(model: str, data_url: str, *, json_mode: bool) -> dict:
     payload = {
         "model": model,
@@ -276,7 +249,7 @@ def recognize_ingredients(
                 payload_for(used_model), deadline_seconds=remaining, retry_delays=(), attempt_timeout=timeout
             )
         try:
-            ingredients, is_food, notes = parse_result(extract_json(_message_text(response)))
+            ingredients, is_food, notes = parse_result(extract_json(message_text(response)))
             break
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             log.warning("인식 응답 파싱 실패 (모델 %s, 시도 %d)", used_model, attempt + 1)

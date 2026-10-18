@@ -14,7 +14,8 @@ from core.fridge_flow import image_digest
 from core.runtime import get_daily_limiter
 from core.vision import Ingredient, RecognitionResult
 
-PAGE = str(Path(__file__).resolve().parent.parent / "app_pages" / "fridge.py")
+# 페이지 이동(st.switch_page)이 동작하도록 앱 전체를 띄운다. 기본 페이지가 1단계다.
+PAGE = str(Path(__file__).resolve().parent.parent / "streamlit_app.py")
 
 
 class FakeRecognizer:
@@ -140,10 +141,12 @@ def test_other_interactions_do_not_call_model_again(monkeypatch, png_bytes):
     monkeypatch.setattr(core.vision, "recognize_ingredients", fake)
     at = upload_and_recognize(AppTest.from_file(PAGE, default_timeout=15), png_bytes)
 
-    button(at, "이 재료로 레시피 찾기").click().run()
-    assert any("다음 단계" in i.value for i in at.info)
     at.run()
     button(at, "재료 인식").click().run()  # 같은 사진 다시 인식 → 저장된 결과 사용
+    assert fake.calls == 1
+
+    button(at, "이 재료로 레시피 찾기").click().run()  # 2단계 페이지로 이동
+    assert at.title[0].value == "레시피 추천"
     assert fake.calls == 1
 
 

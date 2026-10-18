@@ -10,6 +10,7 @@ st.set_page_config(page_title="냉장고 레시피", page_icon="🥬", layout="c
 
 pages = [
     st.Page("app_pages/fridge.py", title="냉장고 재료 찾기", icon="🥬", default=True),
+    st.Page("app_pages/recipes.py", title="레시피 추천", icon="🍳"),
 ]
 page = st.navigation(pages)
 

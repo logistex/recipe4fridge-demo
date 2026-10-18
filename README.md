@@ -21,15 +21,15 @@
 | 단계 | 문서 | 상태 |
 |---|---|---|
 | 1. 냉장고 사진 식재료 인식 | [docs/PRD_step1.md](docs/PRD_step1.md) | 구현 완료 (배포 전) |
-| 2. 레시피 생성 | [docs/PRD_step2.md](docs/PRD_step2.md) | 기획 완료 |
+| 2. 레시피 생성 | [docs/PRD_step2.md](docs/PRD_step2.md) | 구현 완료 (배포 전) |
 | 3. 사용자 프로필과 레시피 저장 | [docs/PRD_step3.md](docs/PRD_step3.md) | 기획 완료 |
 
 ## 폴더 구조
 
 ```
 streamlit_app.py      앱 진입점 (페이지 등록)
-app_pages/            화면 (fridge.py: 1단계)
-core/                 화면과 분리된 로직 (OpenRouter 클라이언트, 이미지 인식, 요청 제한)
+app_pages/            화면 (fridge.py: 1단계 식재료 인식, recipes.py: 2단계 레시피 추천)
+core/                 화면과 분리된 로직 (OpenRouter 클라이언트, 이미지 인식, 레시피 생성, 재료 사전, 요청 제한)
 tests/                pytest 테스트 (실제 모델은 부르지 않음)
 docs/                 기획 문서 (PRD)
 scripts/              OpenRouter API 동작 확인 스크립트

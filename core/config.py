@@ -37,6 +37,11 @@ VISION_ATTEMPT_TIMEOUT_SECONDS = 60  # 기본 모델 요청 하나
 FALLBACK_ATTEMPT_TIMEOUT_SECONDS = 30  # 예비 모델 요청 하나. 느린 모델은 빨리 건너뛴다
 VISION_DEADLINE_SECONDS = 120
 
+RECIPE_ATTEMPT_TIMEOUT_SECONDS = 90  # 추론 모델이라 요청 하나가 길다
+RECIPE_DEADLINE_SECONDS = 150
+RECIPE_COUNT = 3
+MAX_RECIPE_INGREDIENTS = 50
+
 SESSION_REQUESTS_PER_MINUTE = 3
 DEFAULT_DAILY_REQUEST_LIMIT = 40
 
@@ -80,6 +85,20 @@ def get_api_key() -> str | None:
 
 def vision_model() -> str:
     return get_setting("VISION_MODEL", DEFAULT_VISION_MODEL)
+
+
+def text_model() -> str:
+    return get_setting("TEXT_MODEL", DEFAULT_TEXT_MODEL)
+
+
+def pantry_items() -> tuple[str, ...]:
+    """기본 양념(부족한 재료로 세지 않음). 쉼표로 구분한 PANTRY_ITEMS 설정으로 바꿀 수 있다."""
+    from core.pantry import DEFAULT_PANTRY
+
+    value = get_setting("PANTRY_ITEMS")
+    if not value:
+        return DEFAULT_PANTRY
+    return tuple(i.strip() for i in value.split(",") if i.strip())
 
 
 def fallback_vision_models() -> tuple[str, ...]:
