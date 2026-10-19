@@ -1,31 +1,29 @@
-"""2단계: 확정 재료로 레시피 추천 (docs/PRD_step2.md)."""
-
-import re
+"""2단계: 확정 재료로 레시피 추천 (docs/PRD_step2.md). 3단계: 프로필 반영과 저장 (docs/PRD_step3.md)."""
 
 import streamlit as st
 
 from core import config
 from core.errors import MESSAGES, AppError
+from core.options import (
+    ALLERGY_OPTIONS,
+    CUISINE_OPTIONS,
+    DIET_OPTIONS,
+    DIFFICULTY_OPTIONS,
+    MISSING_OPTIONS,
+    TIME_OPTIONS,
+)
 from core.recipe_flow import input_key, request_recipes
-from core.recipe_gen import CUISINES, DIFFICULTIES, REJECT_REASONS, Preferences, generate_recipes
-from core.runtime import get_client, get_daily_limiter
-from core.ui import show_failure, show_process
+from core.recipe_gen import REJECT_REASONS, Preferences, generate_recipes
+from core.recipe_view import render_details, render_summary
+from core.repository import dedupe_key, get_profile, save_recipe, saved_keys
+from core.runtime import db_guard, get_client, get_daily_limiter, get_engine
+from core.ui import md, show_failure, show_process
 
 FRIDGE_PAGE = "app_pages/fridge.py"
-
-TIME_OPTIONS = {"15분": 15, "30분": 30, "60분": 60, "제한 없음": None}
-DIFFICULTY_OPTIONS = {"쉬움": "easy", "보통": "normal", "상관없음": None}
-CUISINE_OPTIONS = {"한식": "korean", "양식": "western", "중식": "chinese", "일식": "japanese", "상관없음": None}
-MISSING_OPTIONS = {"허용 안 함": 0, "2개까지": 2, "상관없음": None}
-DIET_OPTIONS = ["채식", "비건", "글루텐 제외"]
-ALLERGY_OPTIONS = ["달걀", "우유", "밀", "대두", "땅콩", "견과류", "새우", "게", "조개", "생선", "오징어", "돼지고기", "소고기", "닭고기", "복숭아", "토마토"]
+LOGIN_PAGE = "app_pages/login.py"
 
 state = st.session_state
-
-
-def md(text: str) -> str:
-    """모델이 만든 글을 마크다운으로 해석하지 않도록 특수 문자를 이스케이프한다(링크·이미지 문법 차단)."""
-    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~])", r"\\\1", text or "")
+user = state.get("user")  # streamlit_app.py가 정한 현재 사용자 (비로그인이면 None)
 
 
 def _quantity(ing: dict) -> str:
@@ -34,11 +32,6 @@ def _quantity(ing: dict) -> str:
         return ing["name"]
     q = int(q) if float(q).is_integer() else q
     return f"{ing['name']} {q}{ing.get('unit') or ''}"
-
-
-def _timer(seconds: int) -> str:
-    m, s = divmod(seconds, 60)
-    return f"{m}분 {s}초" if m and s else (f"{m}분" if m else f"{s}초")
 
 
 st.title("레시피 추천")
@@ -54,6 +47,26 @@ api_key = config.get_api_key()
 if not api_key:
     st.error(MESSAGES["CONFIG_ERROR"])
 
+# --- 프로필 (3단계) -------------------------------------------------------------------
+# 로그인했으면 프로필 값을 조건의 기본값으로 한 번 채운다(F3-17). 알레르기는 항상 합쳐서 적용한다(F3-18).
+profile = {}
+if user:
+    try:
+        with db_guard():
+            profile = get_profile(get_engine(), user.id)
+    except AppError as e:
+        show_failure("프로필을 불러오지 못했어요", {"message": e.message})
+    if profile and state.get("prefs_loaded_for") != user.id:
+        state["pref_servings"] = profile.get("default_servings", 2)
+        state["pref_diet"] = list(profile.get("diet") or [])
+        cuisines = profile.get("cuisines") or []
+        if len(cuisines) == 1:
+            label = next((k for k, v in CUISINE_OPTIONS.items() if v == cuisines[0]), None)
+            if label:
+                state["pref_cuisine"] = label
+        state["prefs_loaded_for"] = user.id
+profile_allergies = list(profile.get("allergies") or [])
+
 # --- 가진 재료 --------------------------------------------------------------------
 line = st.container(horizontal=True, vertical_alignment="center")
 line.markdown("**가진 재료** · " + md(", ".join(_quantity(i) for i in ingredients)), width="stretch")
@@ -64,8 +77,8 @@ if line.button("재료 수정", icon=":material/edit:"):
 # 위젯 값은 key로 세션에 남는다. 기본값이면 펼치지 않고 바로 추천받을 수 있다.
 servings = state.get("pref_servings", 2)
 time_label = state.get("pref_time", "제한 없음")
-allergies = state.get("pref_allergies", [])
-summary = f"조건: {servings}인분 · {time_label}" + (f" · 알레르기 {len(allergies)}개" if allergies else "")
+n_allergies = len(set(state.get("pref_allergies", [])) | set(profile_allergies))
+summary = f"조건: {servings}인분 · {time_label}" + (f" · 알레르기 {n_allergies}개" if n_allergies else "")
 with st.expander(summary + " (바꾸기)"):
     st.number_input("인분", min_value=1, max_value=6, value=2, step=1, key="pref_servings")
     st.segmented_control("최대 조리 시간", list(TIME_OPTIONS), default="제한 없음", required=True, key="pref_time")
@@ -77,15 +90,22 @@ with st.expander(summary + " (바꾸기)"):
         "알레르기", ALLERGY_OPTIONS, accept_new_options=True, key="pref_allergies", placeholder="없음 (직접 입력 가능)",
         help="여기 있는 재료와 그 재료로 만든 식품(예: 새우 → 새우젓)이 들어간 레시피는 보여 주지 않아요.",
     )
+    if profile_allergies:
+        st.caption("프로필에 적은 알레르기도 항상 함께 적용돼요: " + md(", ".join(profile_allergies)))
+    if profile.get("disliked"):
+        st.caption("프로필의 싫어하는 재료는 가능하면 빼고 만들어요: " + md(", ".join(profile["disliked"])))
 
+selected_allergies = list(state.get("pref_allergies", []))
 prefs = Preferences(
     servings=int(state.get("pref_servings", 2)),
     max_time_minutes=TIME_OPTIONS[state.get("pref_time") or "제한 없음"],
     difficulty=DIFFICULTY_OPTIONS[state.get("pref_difficulty") or "상관없음"],
     cuisine=CUISINE_OPTIONS[state.get("pref_cuisine") or "상관없음"],
     diet=list(state.get("pref_diet", [])),
-    allergies=list(state.get("pref_allergies", [])),
+    allergies=selected_allergies + [a for a in profile_allergies if a not in selected_allergies],
     max_missing=MISSING_OPTIONS[state.get("pref_missing") or "2개까지"],
+    disliked=list(profile.get("disliked") or []),
+    skill_level=profile.get("skill_level"),
 )
 basis = input_key(ingredients, prefs, [])
 
@@ -134,49 +154,41 @@ if busy:
 error = state.get("recipe_error")
 failed_now = bool(error and error["basis"] == basis)
 if failed_now:
-    show_failure(
-        "다른 레시피를 가져오지 못했어요" if error["more"] else "레시피 추천에 실패했어요", error
-    )
+    show_failure("다른 레시피를 가져오지 못했어요" if error["more"] else "레시피 추천에 실패했어요", error)
+
+
+# --- 저장 (3단계) ---------------------------------------------------------------------
+def _save(recipe: dict, model: str) -> None:
+    if not user:
+        state["after_login"] = "app_pages/recipes.py"
+        state["goto"] = LOGIN_PAGE
+        return
+    try:
+        with db_guard():
+            save_recipe(get_engine(), user.id, recipe, state.get("recipe_input") or {}, model)
+        state["save_notice"] = ("success", f"'{recipe['title']}'을(를) 내 레시피에 저장했어요.")
+    except AppError as e:
+        state["save_notice"] = ("info" if e.code == "ALREADY_SAVED" else "error", e.message)
+
+
+saved = set()
+if user:
+    try:
+        with db_guard():
+            saved = saved_keys(get_engine(), user.id)
+    except AppError:
+        pass  # 저장 표시만 못 할 뿐이다. 저장을 누르면 실패가 그대로 보인다.
 
 # --- 결과 -------------------------------------------------------------------------
-
-
-def render_recipe(r: dict) -> None:
-    with st.container(border=True):
-        st.markdown(f"#### {md(r['title'])}")
-        if r.get("summary"):
-            st.markdown(md(r["summary"]))
-        meta = [
-            f"⏱ {r['time_minutes']}분" if r.get("time_minutes") else None,
-            DIFFICULTIES.get(r["difficulty"]),
-            f"{r['servings']}인분",
-            CUISINES.get(r["cuisine"]) if r["cuisine"] != "other" else None,
-        ]
-        st.caption(" · ".join(m for m in meta if m))
-        missing = r["missing_ingredients"]
-        st.markdown(
-            f"**가진 재료 {round(r['usage_ratio'] * 100)}% 사용** · "
-            + ("추가로 필요: " + md(", ".join(missing)) if missing else "추가로 살 재료 없음")
-        )
-        with st.expander("자세히 보기"):
-            st.markdown("**재료**")
-            lines = []
-            for ing in r["ingredients"]:
-                if ing["is_pantry"]:
-                    mark, note = "🧂", " (기본 양념)"
-                elif ing["have"]:
-                    mark, note = "✓", ""
-                else:
-                    mark, note = "🛒", " — 구매 필요"
-                lines.append(f"- {mark} {md(ing['name'])} {md(ing['amount'])}{note}")
-            st.markdown("\n".join(lines))
-            st.markdown("**조리 순서**")
-            for s in r["steps"]:
-                timer = f" ⏱ {_timer(s['timer_seconds'])}" if s.get("timer_seconds") else ""
-                st.checkbox(f"{s['order']}\\. {md(s['text'])}{timer}", key=f"step_{r['id']}_{s['order']}")
-            if r.get("tips"):
-                st.info("💡 " + md(r["tips"]))
-
+notice = state.pop("save_notice", None)
+if notice:
+    kind, text = notice
+    if kind == "success":
+        st.success(text)
+    elif kind == "info":
+        st.info(text)
+    else:
+        show_failure("레시피를 저장하지 못했어요", {"message": text})
 
 result = state.get("recipe_result")
 if result:
@@ -200,8 +212,19 @@ if result:
     elif reasons:
         st.caption(detail)
     show_process(result.get("attempts") or [])
-    for recipe in recipes:
-        render_recipe(recipe)
+    for r in recipes:
+        with st.container(border=True):
+            st.markdown(f"#### {md(r['title'])}")
+            render_summary(r)
+            with st.expander("자세히 보기"):
+                render_details(r, r["id"])
+            if user and dedupe_key(r) in saved:
+                st.button("저장됨 ✓", key=f"save_{r['id']}", disabled=True)
+            else:
+                st.button(
+                    "저장" if user else "저장 (로그인 필요)", key=f"save_{r['id']}", icon=":material/bookmark:",
+                    on_click=_save, args=(r, result.get("model", "")),
+                )
     st.caption("AI가 만든 레시피입니다. 알레르기와 재료 상태를 꼭 직접 확인하세요.")
     if recipes:
         st.button(

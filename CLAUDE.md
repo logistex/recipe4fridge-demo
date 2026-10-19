@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 냉장고 사진에서 식재료를 인식하고 레시피를 추천하는 Streamlit 앱입니다. OpenRouter의 무료 모델을 쓰고, Streamlit Community Cloud에 무료로 배포합니다. **모든 구성이 무료여야 한다**는 조건이 있습니다.
 
-- 기획은 `docs/PRD_step1.md`(식재료 인식, 구현 완료), `PRD_step2.md`(레시피 생성, 구현 완료), `PRD_step3.md`(프로필과 저장: `st.login` Google OIDC + Neon Postgres)입니다. 구현은 이 순서를 따르며, 각 PRD에 데이터 형식, 화면 구성, 수용 기준이 있습니다.
+- 기획은 `docs/PRD_step1.md`(식재료 인식, 구현 완료), `PRD_step2.md`(레시피 생성, 구현 완료), `PRD_step3.md`(로그인·프로필·저장: 아이디·비밀번호(앱이 직접 관리, argon2) + Google `st.login`, DB는 Supabase Postgres를 Supavisor 세션 풀러로 연결하고 `app` 스키마 + RLS)입니다. 구현은 이 순서를 따르며, 각 PRD에 데이터 형식, 화면 구성, 수용 기준이 있습니다.
 - OpenRouter 무료 모델은 계정 전체에 하루 50회 한도가 있습니다. 실제 API 호출은 꼭 필요할 때만 하고, 테스트는 가짜 클라이언트로 합니다.
 
 ## 명령어
@@ -41,6 +41,13 @@ python scripts/test_openrouter.py [text|image]          # 실제 API 동작 확�
   - 모델이 준 보유 여부·알레르기 준수는 믿지 않습니다. `pantry.py`가 대표 이름(손질법 제거 + 동의어)으로 보유 여부를 다시 계산하고, `recipe_gen.reject_reason()`이 알레르기(파생 식품 포함)·채식·추가 구매 수·시간·요리 종류·중복으로 걸러 냅니다. 모자라면 모자란 수만큼 한 번 더 요청합니다.
   - 생성 결과는 `state["recipe_result"]`, 3단계 저장용 입력은 `state["recipe_input"]`에 둡니다. 조건 위젯은 `pref_*` key로 세션에 남습니다.
 - **실패는 숨기지 않습니다**(`core/ui.py`). `OpenRouterClient.chat()`과 `chat_with_fallback()`에 `log=[]`를 주면 요청마다 `{model, outcome, seconds, limit}`가 쌓이고, 인식·레시피 함수는 이것을 결과(`attempts`)와 `AppError.attempts`에 담습니다. 화면은 `show_failure()`로 "❌ …에 실패했어요"와 시도 내역을, `show_process()`로 성공 전에 실패한 요청을 보여 줍니다. 여러 모델이 모두 실패하면 마지막 시도로 원인을 단정하지 않고 `ALL_MODELS_FAILED`를 냅니다. 실패 뒤 남아 있는 이전 결과에는 "이전 결과"라고 표시하고, 레시피가 3개보다 적으면 부분 실패로 알립니다.
+- 3단계(`core/db.py`, `auth.py`, `passwords.py`, `session.py`, `repository.py`, `app_pages/login.py`·`profile.py`·`my_recipes.py`):
+  - DB는 `config.database_url()`이 `st.secrets [connections.supabase] url` → `DATABASE_URL` → 로컬 `data/local.db`(SQLite) 순서로 정합니다. 같은 SQLAlchemy 테이블 정의를 쓰며, SQLite에서는 `schema_translate_map`으로 `app` 스키마를 지웁니다. Postgres에서는 `init_db()`가 `app` 스키마와 RLS를 설정합니다.
+  - `streamlit_app.py`가 매 실행마다 `session.current_user()`(Google `st.user` → 아이디 세션 쿠키)로 사용자를 정해 `state["user"]`에 두고, 로그인 여부에 따라 등록하는 페이지가 다릅니다. DB 연결에 실패해도 1·2단계는 동작해야 하므로 예외를 사이드바 표시로 바꿉니다.
+  - 아이디 세션 쿠키는 `st.html(..., unsafe_allow_javascript=True)`로 설정하고 `st.context.cookies`로 읽습니다. **쿠키 스크립트는 `goto`(페이지 이동)를 처리한 뒤에 내보내야 합니다.** 이동이 일어나는 실행의 출력은 버려지므로, 순서가 바뀌면 쿠키가 설정되지 않습니다.
+  - DB 오류는 `runtime.db_guard()`로 `AppError("DB_UNAVAILABLE")`로 바꿉니다(원문에 접속 정보가 섞일 수 있어 화면에 내지 않음). 저장소 함수는 모두 `user_id` 조건을 붙입니다.
+  - 테스트는 `tests/conftest.py`가 `config.database_url`을 메모리 SQLite로 고정하므로 로컬 DB나 Supabase에 닿지 않습니다. 화면 테스트는 `core.session.cookie_token`/`google_identity`를 바꿔 끼워 로그인 상태를 흉내 냅니다.
+  - `st.expander`에는 `key`를 줍니다. 저장 후 다시 실행될 때 화면 배치가 바뀌면 key 없는 expander는 닫혀 버립니다.
 - 페이지 이동은 `st.switch_page("app_pages/...")`입니다. 그래서 화면 테스트는 페이지 파일이 아니라 `streamlit_app.py`를 `AppTest`로 띄우고, 2단계는 `at.switch_page(...)`로 엽니다.
 - `tests/test_fridge_page.py`는 `AppTest`로 화면을 돌리며, `core.vision.recognize_ingredients`와 `core.runtime.vision_model_plan`(네트워크 호출)을 monkeypatch합니다. 페이지가 매 실행마다 `from core... import ...`를 다시 하기 때문에 이 방식이 통합니다.
 - `core/` 파일을 고친 뒤 실행 중인 Streamlit 서버는 예전 모듈을 그대로 들고 있을 수 있습니다(ImportError 등). 서버를 다시 시작합니다.
@@ -49,7 +56,7 @@ python scripts/test_openrouter.py [text|image]          # 실제 API 동작 확�
 
 - 키는 `core/config.get_setting()`이 `st.secrets` → 환경 변수 → 프로젝트 루트 `.env` 순서로 찾습니다. 로컬에서는 `.env`, Community Cloud에서는 앱 Secrets를 씁니다.
 - `.env`의 값을 읽어서 출력하지 않습니다. 확인이 필요할 때는 길이나 접두사(`sk-or-v1-`)만 봅니다. 새 비밀 값을 추가하면 `.env.example`과 `.streamlit/secrets.toml.example`에 자리표시자를 넣습니다.
-- `.gitignore`가 `.env`, `.env.*`, `.streamlit/secrets.toml`을 제외합니다. `.git/hooks/pre-commit` 훅은 `.env` 파일이나 `sk-or-v1-` 형식의 키가 스테이징되면 커밋을 막습니다. 이 훅은 git이 추적하지 않으므로, 저장소를 새로 clone하면 다시 설치해야 합니다.
+- `.gitignore`가 `.env`, `.env.*`, `.streamlit/secrets.toml`, `data/`(로컬 DB)를 제외합니다. `.git/hooks/pre-commit` 훅은 이 파일들과 `sk-or-v1-` 키, 비밀번호가 든 Postgres 연결 문자열, Google 클라이언트 보안 비밀(`GOCSPX-`)이 스테이징되면 커밋을 막습니다(`<자리표시자>`는 허용). 이 훅은 git이 추적하지 않으므로, 저장소를 새로 clone하면 다시 설치해야 합니다.
 
 ## 실행 시 확인 사항
 

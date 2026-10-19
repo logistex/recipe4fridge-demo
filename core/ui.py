@@ -1,8 +1,14 @@
 """실패와 처리 과정을 화면에 정직하게 보여 주는 공용 표시 (1·2단계)."""
 
+import re
 from collections import Counter
 
 import streamlit as st
+
+
+def md(text) -> str:
+    """사용자 입력·모델 출력을 마크다운으로 해석하지 않도록 특수 문자를 이스케이프한다(링크·이미지 문법 차단)."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~])", r"\\\1", str(text or ""))
 
 
 def short_model(model: str | None) -> str:

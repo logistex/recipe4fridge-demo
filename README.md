@@ -13,8 +13,8 @@
 |---|---|
 | 앱 | [Streamlit](https://streamlit.io) |
 | 배포 | [Streamlit Community Cloud](https://share.streamlit.io) |
-| 로그인 (3단계) | Streamlit 내장 로그인 `st.login` + Google 계정 |
-| DB (3단계) | [Neon](https://neon.com) Postgres 무료 요금제 |
+| 로그인 (3단계) | 아이디·비밀번호(앱이 직접 관리, argon2 해시) + Google 로그인(Streamlit 내장 `st.login`) |
+| DB (3단계) | [Supabase](https://supabase.com) 무료 요금제의 Postgres (DB로만 사용) |
 
 ## 진행 상황
 
@@ -22,14 +22,14 @@
 |---|---|---|
 | 1. 냉장고 사진 식재료 인식 | [docs/PRD_step1.md](docs/PRD_step1.md) | 구현 완료 (배포 전) |
 | 2. 레시피 생성 | [docs/PRD_step2.md](docs/PRD_step2.md) | 구현 완료 (배포 전) |
-| 3. 사용자 프로필과 레시피 저장 | [docs/PRD_step3.md](docs/PRD_step3.md) | 기획 완료 |
+| 3. 로그인·프로필·레시피 저장 | [docs/PRD_step3.md](docs/PRD_step3.md) | 구현 완료 (로컬 DB로 확인, Supabase·Google 로그인은 설정 후 확인 필요) |
 
 ## 폴더 구조
 
 ```
 streamlit_app.py      앱 진입점 (페이지 등록)
-app_pages/            화면 (fridge.py: 1단계 식재료 인식, recipes.py: 2단계 레시피 추천)
-core/                 화면과 분리된 로직 (OpenRouter 클라이언트, 이미지 인식, 레시피 생성, 재료 사전, 요청 제한)
+app_pages/            화면 (fridge.py: 1단계, recipes.py: 2단계, login·profile·my_recipes.py: 3단계)
+core/                 화면과 분리된 로직 (OpenRouter, 인식, 레시피 생성, 재료 사전, 요청 제한, 계정, DB, 저장소)
 tests/                pytest 테스트 (실제 모델은 부르지 않음)
 docs/                 기획 문서 (PRD)
 scripts/              OpenRouter API 동작 확인 스크립트
@@ -66,6 +66,14 @@ scripts/              OpenRouter API 동작 확인 스크립트
 ```bash
 .venv/Scripts/python scripts/live_check.py
 ```
+
+## 3단계 저장소와 로그인 설정
+
+설정이 없어도 앱은 동작합니다. 이때는 로컬 개발용 SQLite 파일(`data/local.db`, git 제외)에 계정과 레시피를 저장하고, 아이디 로그인만 쓸 수 있습니다.
+
+1. **Supabase (DB)**: [supabase.com](https://supabase.com)에서 무료 프로젝트를 만들고, 대시보드 > Connect > **Session pooler** 연결 문자열을 `.streamlit/secrets.toml`의 `[connections.supabase] url`에 넣습니다(형식은 `.streamlit/secrets.toml.example`). 앱이 처음 연결할 때 `app` 스키마와 테이블을 만들고 RLS를 켭니다.
+2. **Google 로그인**: Google Cloud 콘솔에서 OAuth 동의 화면과 "웹 애플리케이션" OAuth 클라이언트를 만들고, 리디렉션 URI에 `http://localhost:8501/oauth2callback`을 넣은 뒤, `[auth]`와 `[auth.google]` 값을 채웁니다.
+3. Supabase 무료 프로젝트는 1주일 동안 쓰지 않으면 일시 정지됩니다. 그동안 로그인·저장은 실패로 표시되고, 재료 찾기·레시피 추천은 그대로 쓸 수 있습니다.
 
 ## Streamlit Community Cloud 배포
 

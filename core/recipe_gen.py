@@ -51,6 +51,8 @@ class Preferences:
     diet: list[str] = field(default_factory=list)
     allergies: list[str] = field(default_factory=list)
     max_missing: int | None = 2  # None: 상관없음
+    disliked: list[str] = field(default_factory=list)  # 3단계 프로필: 가능하면 쓰지 않을 재료
+    skill_level: str | None = None  # 3단계 프로필: "beginner"면 설명을 더 자세히
 
     def cleaned(self) -> "Preferences":
         if not isinstance(self.servings, int) or not 1 <= self.servings <= 6:
@@ -63,6 +65,8 @@ class Preferences:
             diet=_clean_list(self.diet, 20),
             allergies=_clean_list(self.allergies, 20),
             max_missing=self.max_missing if self.max_missing is None or self.max_missing >= 0 else 2,
+            disliked=_clean_list(self.disliked, 20),
+            skill_level=self.skill_level if self.skill_level in ("beginner", "normal", "expert") else None,
         )
 
 
@@ -202,6 +206,10 @@ def build_user_prompt(ingredients, prefs: Preferences, exclude_titles, pantry_it
         "[알레르기] " + (", ".join(prefs.allergies) or "없음"),
         "[제외할 요리] " + (", ".join(exclude_titles) or "없음"),
     ]
+    if prefs.disliked:
+        lines.append("[싫어하는 재료] " + ", ".join(prefs.disliked) + " (가능하면 쓰지 않는다)")
+    if prefs.skill_level == "beginner":
+        lines.append("[요리 실력] 초보 (조리 순서를 더 잘게 나누고, 어려운 용어는 풀어서 설명한다)")
     return "\n".join(lines)
 
 

@@ -3,13 +3,13 @@
 | 항목 | 내용 |
 |---|---|
 | 제품 | 냉장고 사진 기반 레시피 추천 웹 애플리케이션 |
-| 단계 | 3 / 3 (사용자 프로필, 레시피 저장) |
+| 단계 | 3 / 3 (로그인, 사용자 프로필, 레시피 저장) |
 | 사용 모델 | 새로 추가하는 모델 없음 (2단계 생성 요청에 프로필 정보를 반영) |
 | 개발·배포 | Streamlit 앱, Streamlit Community Cloud에 무료 배포 |
-| 로그인 | Streamlit 내장 로그인(`st.login`, OpenID Connect), Google 계정 |
-| 저장소(DB) | Neon Postgres 무료 요금제 |
+| 로그인 | ① 아이디·비밀번호(앱이 직접 관리) ② Google 로그인(Streamlit 내장 `st.login`) — 두 방식을 함께 제공 |
+| 저장소(DB) | Supabase 무료 요금제의 Postgres (Supabase는 DB로만 사용) |
 | 이전 단계 | [PRD_step1.md](PRD_step1.md), [PRD_step2.md](PRD_step2.md) |
-| 작성일 | 2026-10-18 (같은 날 FastAPI·SQLite 기준에서 Streamlit·Neon 기준으로 개정) |
+| 작성일 | 2026-10-18 작성, 2026-10-19 개정 (DB를 Neon에서 Supabase로, 로그인에 아이디·비밀번호 추가) |
 
 ## 1. 배경과 목적
 
@@ -21,95 +21,128 @@
 
 | 결정 | 이유 |
 |---|---|
-| **로그인은 `st.login`(Google OIDC)** | Streamlit이 OIDC 로그인과 신원 쿠키를 직접 처리해 준다. 비밀번호를 받지 않으므로 비밀번호 해시, 로그인 실패 잠금, 비밀번호 변경과 재설정, CSRF 처리를 만들 필요가 없다. Google OAuth 클라이언트는 무료로 만들 수 있다. |
-| **DB는 Neon Postgres** | Community Cloud는 실행 중에 만든 파일을 재시작하거나 재배포할 때 지운다. 그래서 SQLite 파일은 쓸 수 없다. Neon 무료 요금제는 기간 제한이 없고(체험판이 아님), 프로젝트당 1GB 저장 공간과 월 100 CU-시간을 준다. 5분 동안 쓰지 않으면 잠들었다가 요청이 오면 자동으로 깨어난다. |
-| **DB 연결은 `st.connection("neon", type="sql")`** | Streamlit 내장 SQL 연결(SQLAlchemy 기반)이라, 연결 정보를 `st.secrets`에 두고 연결 풀을 알아서 관리한다. |
+| **DB는 Supabase Postgres** | 사용자가 정한 결정. Community Cloud는 실행 중에 만든 파일을 재시작하거나 재배포할 때 지우므로 SQLite 파일은 쓸 수 없고, 외부 DB가 필요하다. Supabase 무료 요금제는 DB 500MB와 무료 프로젝트 2개를 준다(2026-10 확인). |
+| **Supabase는 DB로만 쓰고, Supabase Auth는 쓰지 않음** | Supabase Auth의 비밀번호 로그인은 이메일(또는 전화번호)이 필요해서 "아이디" 로그인과 맞지 않는다. Supabase Auth의 Google 로그인은 리디렉션과 토큰 처리를 Streamlit 안에서 직접 구현해야 해서, Streamlit 내장 `st.login`보다 복잡하다. |
+| **아이디·비밀번호는 앱이 직접 관리** | 사용자 테이블에 아이디와 비밀번호 해시(argon2)를 저장한다. 비밀번호 평문은 저장하지도 로그에 남기지도 않는다. |
+| **Google 로그인은 `st.login`(OIDC)** | Streamlit이 Google 로그인과 신원 쿠키를 직접 처리해 준다. Google OAuth 클라이언트는 무료로 만들 수 있다. |
+| **연결은 Supavisor 풀러(세션 모드, 5432 포트)** | 무료 요금제의 직접 연결 주소는 IPv6 전용이라 IPv4 환경에서 연결되지 않을 수 있다. 풀러는 IPv4를 지원한다. Streamlit 서버는 계속 떠 있는 프로세스이므로 세션 모드를 쓴다. |
+| **테이블은 `public`이 아닌 `app` 스키마에 둠** | Supabase는 `public` 스키마의 테이블을 REST API로 노출한다. 앱은 REST API를 쓰지 않으므로 노출되지 않는 스키마에 두고, 혹시 모를 노출에 대비해 모든 테이블에 RLS(행 수준 보안)를 켜고 정책은 만들지 않는다(API로는 아무것도 읽을 수 없음). 앱은 DB 접속 계정으로 직접 연결하므로 RLS의 영향을 받지 않는다. |
+
+**Supabase 무료 요금제의 제약** (2026-10 확인)
+- **1주일 동안 쓰지 않으면 프로젝트가 일시 정지된다.** 정지되면 저장·불러오기가 실패하고, Supabase 대시보드에서 다시 켜야 한다(데이터는 남아 있음). 대응은 11장 참고.
+- 자동 백업이 없다. 중요한 데이터가 생기면 `pg_dump`로 직접 백업한다.
+- DB 500MB, 데이터 전송 5GB/월.
 
 ## 3. 목표와 비목표
 
 **목표**
-- Google 계정으로 로그인, 로그아웃할 수 있다.
+- 아이디·비밀번호로 가입하고 로그인할 수 있다. Google 계정으로도 로그인할 수 있다.
 - 프로필(닉네임, 알레르기, 식이 조건, 싫어하는 재료, 요리 실력, 기본 인분, 선호 요리 종류)을 관리할 수 있다.
 - 2단계 레시피를 저장하고, 목록 보기, 상세 보기, 메모, 별점, 즐겨찾기, 삭제를 할 수 있다.
 - 로그인하지 않아도 1·2단계 기능은 그대로 쓸 수 있다. 저장할 때만 로그인을 요구한다.
-- 비용 없이 운영한다(Community Cloud + Neon 무료 + Google OAuth).
+- 비용 없이 운영한다(Community Cloud + Supabase 무료 + Google OAuth).
 
 **비목표 (3단계에서 하지 않음)**
-- 이메일과 비밀번호 가입, Google 외 다른 로그인 제공자(구조상 나중에 추가는 가능)
-- 레시피 공유와 공개 피드, 댓글
-- 여러 기기 동시 편집 충돌 처리
+- 비밀번호 찾기·재설정 메일 (아이디 계정은 이메일을 받지 않으므로 메일을 보낼 수 없다)
+- 아이디 계정과 Google 계정 연결·합치기 (같은 사람이라도 별개 계정으로 본다)
+- Google 외 다른 소셜 로그인, 레시피 공유와 공개 피드, 댓글
 
 ## 4. 사용자 시나리오
 
-**첫 로그인과 프로필 설정**
-1. 사용자가 사이드바의 "Google로 로그인"을 누른다. Google 로그인 화면을 거쳐 앱으로 돌아온다.
-2. 처음 로그인한 사용자면 프로필 페이지로 안내된다. 닉네임은 Google 이름으로 미리 채워진다. 알레르기("새우, 땅콩"), 싫어하는 재료("고수"), 기본 인분(2), 요리 실력("초보")을 입력하고 저장한다.
+**아이디로 가입**
+1. 사이드바의 "로그인"을 누르면 로그인 화면이 나온다. 탭은 "로그인 / 회원가입 / Google".
+2. "회원가입" 탭에서 아이디, 비밀번호, 비밀번호 확인, 닉네임을 입력한다. 가입하면 바로 로그인되고 프로필 화면으로 안내된다.
+
+**Google로 로그인**
+3. "Google로 로그인"을 누르면 Google 로그인 화면을 거쳐 앱으로 돌아온다. 처음이면 계정이 만들어지고, 닉네임은 Google 이름으로 채워진다.
 
 **프로필이 반영된 추천**
-3. 냉장고 사진을 올리고 재료를 확정한 뒤 레시피 페이지로 가면, 알레르기, 싫어하는 재료, 인분이 프로필 값으로 미리 채워져 있다. 이번 요청에서만 바꿀 수도 있다.
+4. 프로필에 알레르기("새우, 땅콩"), 싫어하는 재료("고수"), 기본 인분(2)을 저장해 두면, 레시피 페이지의 조건이 이 값으로 미리 채워진다.
 
 **레시피 저장과 다시 보기**
-4. 추천받은 레시피 카드에서 "저장"을 누르면 "내 레시피"에 저장된다.
-5. "내 레시피" 페이지에서 저장한 레시피를 최신순, 별점순, 조리 시간순으로 정렬하거나 즐겨찾기만 걸러 보고, 제목이나 재료로 검색한다.
-6. 레시피를 만들어 본 뒤 별점과 메모("간장을 조금 줄이면 더 맛있음")를 남긴다.
+5. 레시피 카드의 "저장"을 누르면 "내 레시피"에 저장된다.
+6. "내 레시피"에서 정렬, 즐겨찾기 필터, 검색을 하고, 별점과 메모를 남긴다.
 
 **비로그인 사용자의 저장**
-7. 로그인하지 않은 사용자가 "저장"을 누르면 "저장하려면 로그인하세요"라는 안내와 로그인 버튼이 나온다.
+7. 로그인하지 않은 사용자가 "저장"을 누르면 "저장하려면 로그인하세요"라는 안내와 로그인 단추가 나온다.
 
 ## 5. 기능 요구사항
 
-### 5.1 로그인과 계정
+### 5.1 아이디·비밀번호 계정
 
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
-| F3-1 | 사이드바에 로그인 상태를 보여 준다. 로그아웃 상태면 "Google로 로그인"(`st.login("google")`), 로그인 상태면 닉네임과 "로그아웃"(`st.logout()`)을 보여 준다. | 필수 |
-| F3-2 | 사용자 식별은 `st.user`의 OIDC 고유 ID(`sub`)로 한다. 이메일은 바뀔 수 있으므로 식별자로 쓰지 않고 표시용으로만 저장한다. | 필수 |
-| F3-3 | 처음 로그인하면 `users`와 `profiles` 행을 만든다. 닉네임 기본값은 `st.user.name`이다. | 필수 |
-| F3-4 | 계정을 삭제하면 그 사용자의 프로필과 저장 레시피를 모두 지우고 로그아웃한다. 삭제 전에 "복구할 수 없습니다"라고 안내하고, 확인 문구("삭제")를 직접 입력하게 한다. Google 계정 자체에는 영향이 없다고 함께 안내한다. | 필수 |
-| F3-5 | 로그인하지 않으면 "내 레시피"와 "프로필" 페이지를 메뉴에 보이지 않게 한다(`st.navigation`에 넣는 페이지를 로그인 상태에 따라 바꿈). | 필수 |
+| F3-1 | 아이디는 4–20자, 영문 소문자·숫자·밑줄(`_`)만 쓴다. 대소문자를 구분하지 않고 중복될 수 없다. | 필수 |
+| F3-2 | 비밀번호는 8–64자, 영문과 숫자를 모두 포함한다. 아이디와 같은 비밀번호는 거부한다. | 필수 |
+| F3-3 | 비밀번호는 argon2(`argon2-cffi`)로 해시해서 저장한다. 평문은 어디에도 저장하거나 기록하지 않는다. | 필수 |
+| F3-4 | 로그인 실패 메시지는 "아이디 또는 비밀번호가 올바르지 않아요"로 통일해서, 어느 쪽이 틀렸는지(아이디가 존재하는지) 알려 주지 않는다. | 필수 |
+| F3-5 | 같은 아이디로 15분 안에 5회 실패하면 15분 동안 그 아이디의 로그인을 막는다. 시도 기록은 DB에 남긴다(세션 상태는 새로고침하면 초기화되므로). | 필수 |
+| F3-6 | 로그인하면 무작위 세션 토큰(32바이트)을 만들어, 해시는 DB `sessions` 테이블에, 원본은 브라우저 쿠키에 저장한다(14일 유지). 새로고침해도 `st.context.cookies`로 쿠키를 읽어 로그인을 유지한다. 쿠키는 `st.html(unsafe_allow_javascript=True)`로 설정한다. | 필수 |
+| F3-7 | 로그아웃하면 DB의 세션을 지우고 쿠키도 지운다. | 필수 |
+| F3-8 | 로그인한 상태에서 현재 비밀번호를 확인한 뒤 비밀번호를 바꿀 수 있다. 바꾸면 다른 기기의 세션은 모두 끊는다. | 필수 |
 
-### 5.2 프로필
-
-| ID | 요구사항 | 우선순위 |
-|---|---|---|
-| F3-6 | 프로필 항목: 닉네임(2–20자), 알레르기(최대 20개), 식이 조건(채식, 비건, 글루텐 제외 등 다중 선택), 싫어하는 재료(최대 20개), 요리 실력(초보/보통/능숙), 기본 인분(1–6), 선호 요리 종류(다중 선택). | 필수 |
-| F3-7 | 2단계 조건 화면을 열면 프로필 값을 기본값으로 채운다. 이번 요청에서 바꾼 값은 프로필에 저장하지 않는다. | 필수 |
-| F3-8 | 프로필의 알레르기는 2단계 서버 필터(F2-7)에도 자동으로 적용된다. 사용자가 조건 화면에서 지워도 프로필 알레르기를 합쳐서 적용한다. | 필수 |
-| F3-9 | 싫어하는 재료는 프롬프트에 "가능하면 쓰지 않기"로 전달한다. 알레르기와 달리 결과에서 강제로 걸러 내지는 않는다. | 필수 |
-| F3-10 | 요리 실력이 "초보"이면 프롬프트에 "단계를 더 잘게 나누고 용어를 풀어서 설명"을 덧붙인다. | 권장 |
-
-### 5.3 레시피 저장
+### 5.2 Google 로그인
 
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
-| F3-11 | 2단계 레시피 객체 전체를 그 시점 그대로(스냅숏) 저장한다. 생성에 쓴 재료 목록과 조건도 함께 저장한다. | 필수 |
-| F3-12 | 같은 사용자가 같은 레시피(제목과 재료 목록이 같음)를 다시 저장하면 새로 만들지 않고 "이미 저장됨"으로 안내한다. | 필수 |
-| F3-13 | "내 레시피" 목록: 한 번에 20개씩, 최신순(기본), 별점순, 조리 시간순 정렬. 즐겨찾기만 보기 필터. 제목과 재료명 검색. | 필수 |
-| F3-14 | 저장한 레시피에 별점(1–5, `st.feedback("stars")`), 메모(최대 1000자), 즐겨찾기를 달 수 있다. | 필수 |
-| F3-15 | 저장한 레시피의 제목과 조리 순서를 사용자가 직접 고칠 수 있다. 원본 스냅숏은 따로 보관해서 "원래대로" 되돌릴 수 있다. | 권장 |
-| F3-16 | 저장한 레시피를 지울 수 있다. 사용자당 최대 500개까지 저장할 수 있다(Neon 무료 저장 공간 보호). | 필수 |
+| F3-9 | "Google로 로그인"은 `st.login("google")`, 로그아웃은 `st.logout()`을 쓴다. | 필수 |
+| F3-10 | Google 사용자는 `st.user`의 OIDC 고유 ID(`sub`)로 식별한다. 이메일은 표시용으로만 저장한다. | 필수 |
+| F3-11 | 처음 로그인하면 `users`와 `profiles` 행을 만든다. 같은 이메일의 아이디 계정이 있어도 자동으로 합치지 않는다(다른 사람이 이메일을 사칭할 위험). | 필수 |
+
+### 5.3 공통 계정 기능
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| F3-12 | 현재 사용자는 다음 순서로 정한다: Google 로그인 상태(`st.user.is_logged_in`) → 아이디 세션 쿠키 → 비로그인. 화면 코드는 `core.auth.current_user()`만 쓴다. | 필수 |
+| F3-13 | 사이드바에 로그인 상태를 보여 준다. 비로그인이면 "로그인", 로그인이면 닉네임, 로그인 방식(아이디/Google), "로그아웃". | 필수 |
+| F3-14 | 로그인하지 않으면 "내 레시피"와 "프로필" 페이지를 메뉴에 보이지 않게 한다. | 필수 |
+| F3-15 | 계정을 삭제하면 그 사용자의 프로필, 저장 레시피, 세션을 모두 지우고 로그아웃한다. 아이디 계정은 비밀번호를, Google 계정은 확인 문구("삭제")를 입력해야 한다. | 필수 |
+
+### 5.4 프로필
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| F3-16 | 프로필 항목: 닉네임(2–20자), 알레르기(최대 20개), 식이 조건, 싫어하는 재료(최대 20개), 요리 실력(초보/보통/능숙), 기본 인분(1–6), 선호 요리 종류. | 필수 |
+| F3-17 | 2단계 조건 화면을 열면 프로필 값을 기본값으로 채운다. 이번 요청에서 바꾼 값은 프로필에 저장하지 않는다. | 필수 |
+| F3-18 | 프로필의 알레르기는 2단계 서버 필터에도 항상 적용한다. 조건 화면에서 지워도 프로필 알레르기를 합쳐서 적용한다. | 필수 |
+| F3-19 | 싫어하는 재료는 프롬프트에 "가능하면 쓰지 않기"로 전달한다(강제로 걸러 내지는 않음). 요리 실력이 "초보"이면 "단계를 더 잘게 나누고 용어를 풀어서 설명"을 덧붙인다. | 권장 |
+
+### 5.5 레시피 저장
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| F3-20 | 2단계 레시피 객체 전체를 그 시점 그대로(스냅숏) 저장한다. 생성에 쓴 재료 목록과 조건(`state["recipe_input"]`)도 함께 저장한다. | 필수 |
+| F3-21 | 같은 사용자가 같은 레시피(제목과 재료 목록이 같음)를 다시 저장하면 "이미 저장됨"으로 안내한다. | 필수 |
+| F3-22 | "내 레시피" 목록: 한 번에 20개씩, 최신순(기본)·별점순·조리 시간순, 즐겨찾기만 보기, 제목과 재료명 검색. | 필수 |
+| F3-23 | 저장한 레시피에 별점(1–5, `st.feedback("stars")`), 메모(최대 1000자), 즐겨찾기를 달 수 있다. | 필수 |
+| F3-24 | 저장한 레시피의 제목과 조리 순서를 고칠 수 있고, "원래대로"로 저장할 때의 내용으로 되돌릴 수 있다. | 권장 |
+| F3-25 | 사용자당 최대 500개까지 저장할 수 있다(무료 DB 500MB 보호). | 필수 |
+| F3-26 | DB에 연결하지 못하면(프로젝트 일시 정지 등) 실패를 숨기지 않고 "❌ 저장소에 연결하지 못했어요"와 원인을 보여 준다(1·2단계의 실패 표시 방식과 같음). 1·2단계는 계속 쓸 수 있다. | 필수 |
 
 ## 6. 시스템 구성
 
 ```
 브라우저 ──(웹소켓)── Streamlit 앱 (Community Cloud)
-                        │  st.login ──▶ Google OIDC
-                        │  st.connection("neon") ──▶ Neon Postgres (무료)
-                        └─ core/openrouter.py ──▶ OpenRouter
+     │  쿠키: 아이디 세션 토큰            │  st.login ──▶ Google OIDC
+                                           │  st.connection("supabase") ──▶ Supabase Postgres
+                                           │       (Supavisor 풀러, 세션 모드 5432, app 스키마)
+                                           └─ core/openrouter.py ──▶ OpenRouter
 ```
 
 **추가되는 파일**
 ```
 app_pages/
+  login.py               # 로그인 / 회원가입 / Google 탭
   my_recipes.py          # 내 레시피 목록과 상세
-  profile.py             # 프로필, 계정 삭제
+  profile.py             # 프로필, 비밀번호 변경, 계정 삭제
 core/
-  auth.py                # 현재 사용자 확인, 첫 로그인 처리
-  db.py                  # 테이블 생성(마이그레이션), 쿼리 함수
+  auth.py                # current_user(), 가입·로그인·로그아웃, 세션 쿠키, 로그인 실패 제한
+  passwords.py           # argon2 해시·검증, 아이디·비밀번호 규칙 검사
+  db.py                  # 연결, 테이블 생성(마이그레이션)
   repository.py          # 프로필과 저장 레시피 CRUD (항상 user_id 조건 포함)
 ```
 
-**추가 의존성**: `streamlit[auth]`(Authlib 포함), `SQLAlchemy`, `psycopg[binary]`
+**추가 의존성**: `streamlit[auth]`(Authlib), `SQLAlchemy`, `psycopg[binary]`, `argon2-cffi`
 
 **`.streamlit/secrets.toml`에 추가하는 값** (로컬과 Community Cloud 양쪽)
 ```toml
@@ -122,26 +155,43 @@ client_id = "<Google OAuth 클라이언트 ID>"
 client_secret = "<Google OAuth 클라이언트 보안 비밀>"
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 
-[connections.neon]
-url = "postgresql+psycopg://<사용자>:<비밀번호>@<호스트>/<DB>?sslmode=require"
+[connections.supabase]
+# Supabase 대시보드 > Connect > Session pooler 의 연결 문자열 (포트 5432)
+url = "postgresql+psycopg://postgres.<프로젝트ref>:<DB 비밀번호>@aws-0-<지역>.pooler.supabase.com:5432/postgres?sslmode=require"
 ```
-- 로컬용과 배포용은 `redirect_uri`가 다르다. Google Cloud 콘솔의 OAuth 클라이언트에도 두 주소를 모두 등록한다.
-- `cookie_secret`과 DB 비밀번호는 `.env.example`처럼 자리표시자만 담은 `.streamlit/secrets.toml.example`로 문서화한다.
+- 로컬용과 배포용은 `redirect_uri`가 다르다. Google Cloud 콘솔의 OAuth 클라이언트에 두 주소를 모두 등록한다.
+- 위 값들은 `.streamlit/secrets.toml.example`에 자리표시자로만 문서화한다. pre-commit 훅에 Supabase 연결 문자열 형식(`pooler.supabase.com` + 비밀번호)도 검사하도록 추가한다.
 
-## 7. 데이터 모델 (Postgres)
+## 7. 데이터 모델 (Postgres, `app` 스키마)
 
 ```sql
-CREATE TABLE users (
-  id          BIGSERIAL PRIMARY KEY,
-  oidc_sub    TEXT NOT NULL,
-  provider    TEXT NOT NULL DEFAULT 'google',
-  email       TEXT,                       -- 표시용
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (provider, oidc_sub)
+CREATE SCHEMA IF NOT EXISTS app;
+
+CREATE TABLE app.users (
+  id             BIGSERIAL PRIMARY KEY,
+  username       TEXT UNIQUE,                 -- 아이디 계정만 (소문자로 저장)
+  password_hash  TEXT,                        -- 아이디 계정만 (argon2)
+  google_sub     TEXT UNIQUE,                 -- Google 계정만
+  email          TEXT,                        -- Google 계정의 표시용 이메일
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((username IS NOT NULL AND password_hash IS NOT NULL) OR google_sub IS NOT NULL)
 );
 
-CREATE TABLE profiles (
-  user_id           BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+CREATE TABLE app.sessions (               -- 아이디 로그인 세션 (Google은 st.login 쿠키가 담당)
+  token_hash  TEXT PRIMARY KEY,           -- 쿠키 토큰의 SHA-256
+  user_id     BIGINT NOT NULL REFERENCES app.users(id) ON DELETE CASCADE,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE app.login_attempts (         -- 로그인 실패 제한 (F3-5)
+  username     TEXT NOT NULL,
+  attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON app.login_attempts (username, attempted_at);
+
+CREATE TABLE app.profiles (
+  user_id           BIGINT PRIMARY KEY REFERENCES app.users(id) ON DELETE CASCADE,
   nickname          TEXT NOT NULL CHECK (char_length(nickname) BETWEEN 2 AND 20),
   allergies         JSONB NOT NULL DEFAULT '[]',
   diet              JSONB NOT NULL DEFAULT '[]',
@@ -152,14 +202,14 @@ CREATE TABLE profiles (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE saved_recipes (
+CREATE TABLE app.saved_recipes (
   id               BIGSERIAL PRIMARY KEY,
-  user_id          BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  title            TEXT NOT NULL,          -- 검색과 정렬용 (사용자가 고칠 수 있음)
+  user_id          BIGINT NOT NULL REFERENCES app.users(id) ON DELETE CASCADE,
+  title            TEXT NOT NULL,
   recipe           JSONB NOT NULL,         -- 현재 레시피 (사용자가 고친 내용 반영)
   original         JSONB NOT NULL,         -- 저장할 때의 원본 스냅숏
   source_input     JSONB NOT NULL,         -- 생성에 쓴 재료 목록과 조건
-  ingredient_names TEXT NOT NULL,          -- 재료명 검색용 (공백으로 이은 문자열)
+  ingredient_names TEXT NOT NULL,          -- 재료명 검색용
   dedupe_key       TEXT NOT NULL,          -- 제목 + 정렬한 재료명의 해시
   time_minutes     INT,
   rating           SMALLINT CHECK (rating BETWEEN 1 AND 5),
@@ -171,89 +221,115 @@ CREATE TABLE saved_recipes (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (user_id, dedupe_key)
 );
-CREATE INDEX idx_saved_user_created ON saved_recipes (user_id, created_at DESC);
+CREATE INDEX ON app.saved_recipes (user_id, created_at DESC);
+
+-- REST API로 노출되더라도 아무것도 읽히지 않게 RLS를 켜고 정책은 만들지 않는다
+ALTER TABLE app.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.login_attempts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.saved_recipes ENABLE ROW LEVEL SECURITY;
 ```
-- 테이블 생성은 앱이 시작될 때 `CREATE TABLE IF NOT EXISTS`로 한 번 실행한다(`st.cache_resource`로 한 번만).
-- 검색은 `title ILIKE` 또는 `ingredient_names ILIKE`로 시작한다. 레시피가 많아지면 `pg_trgm` 인덱스를 검토한다.
+- 테이블 생성은 앱이 시작될 때 `IF NOT EXISTS`로 한 번 실행한다(`st.cache_resource`).
+- 만료된 세션과 1일이 지난 로그인 실패 기록은 로그인할 때 함께 지운다.
 
-## 8. 로직 함수 (`core/repository.py`)
+## 8. 로직 함수
 
-모든 함수는 첫 인자로 현재 사용자의 `user_id`를 받는다. 그리고 모든 쿼리에 `WHERE user_id = :user_id`를 붙인다. 화면 코드는 `user_id`를 직접 만들지 않고, `core.auth.current_user_id()`가 `st.user`에서 찾은 값만 쓴다.
-
+**`core/auth.py`**
 | 함수 | 설명 |
 |---|---|
-| `get_or_create_user(provider, sub, email, name)` | 첫 로그인 처리. `user_id`를 돌려준다. |
-| `get_profile(user_id)` / `update_profile(user_id, data)` | 프로필 읽기와 쓰기 |
-| `save_recipe(user_id, recipe, source_input, model)` | 저장. 중복이면 `AlreadySaved(id)`, 개수 초과면 `LimitReached` 예외 |
-| `list_recipes(user_id, sort, favorite_only, query, offset, limit=20)` | 목록(요약 필드만) |
-| `get_recipe(user_id, recipe_id)` | 상세. 다른 사용자의 레시피면 `None` |
-| `update_recipe(user_id, recipe_id, **fields)` | 별점, 메모, 즐겨찾기, 제목·조리 순서 수정 |
-| `restore_recipe(user_id, recipe_id)` | 원본 스냅숏으로 되돌리기 |
-| `delete_recipe(user_id, recipe_id)` | 삭제 |
-| `delete_account(user_id)` | `users` 행 삭제(나머지는 `ON DELETE CASCADE`로 함께 삭제) |
+| `current_user() -> User \| None` | Google → 아이디 세션 쿠키 순서로 확인 (F3-12) |
+| `sign_up(username, password, nickname)` | 규칙 검사 → 중복 확인 → 해시 저장 → 로그인 |
+| `log_in(username, password)` | 실패 제한 확인 → 검증 → 세션 생성 → 쿠키 설정. 실패하면 통일된 문구 |
+| `log_out()` | 아이디: 세션 삭제와 쿠키 삭제 / Google: `st.logout()` |
+| `change_password(user, current, new)` | 현재 비밀번호 확인 → 해시 교체 → 이 기기 외 세션 삭제 |
 
-**2단계 변경**: `generate_recipes()`를 부르기 전에, 로그인한 상태면 프로필을 읽어 조건과 합친다.
-- 알레르기: 프로필 값과 요청 값의 합집합으로 강제 적용한다.
-- 싫어하는 재료: 프롬프트에 "가능하면 피하기"로 넣는다.
-- 인분과 요리 종류: 요청 값이 있으면 요청 값을, 없으면 프로필 값을 쓴다.
-- 요리 실력: 프롬프트 지시에 반영한다.
+**`core/repository.py`**: 모든 함수는 첫 인자로 `user_id`를 받고, 모든 쿼리에 `WHERE user_id = :user_id`를 붙인다. 매개변수 바인딩만 쓴다.
+| 함수 | 설명 |
+|---|---|
+| `get_profile` / `update_profile` | 프로필 읽기·쓰기 |
+| `save_recipe(user_id, recipe, source_input, model)` | 중복이면 `AlreadySaved(id)`, 개수 초과면 `LimitReached` |
+| `list_recipes(user_id, sort, favorite_only, query, offset, limit=20)` | 목록 |
+| `get_recipe` / `update_recipe` / `restore_recipe` / `delete_recipe` | 상세·수정·원래대로·삭제. 다른 사용자의 레시피면 `None` |
+| `delete_account(user_id)` | `users` 행 삭제 (나머지는 `ON DELETE CASCADE`) |
+
+**2단계 변경**: 로그인한 상태면 `generate_recipes()`를 부르기 전에 프로필을 읽어 조건과 합친다(F3-17~F3-19).
 
 ## 9. 화면 요구사항
 
 | 페이지 / 요소 | 구성 |
 |---|---|
-| 사이드바 | 로그인 상태, 로그인·로그아웃 버튼. 로그인 상태면 "내 레시피", "프로필" 메뉴가 보인다. |
-| 레시피 카드(2단계) | "저장" 버튼. 이미 저장한 레시피는 "저장됨 ✓"으로 표시한다. 로그아웃 상태에서 누르면 로그인 안내를 보여 준다. |
-| 내 레시피 | 검색창(`st.text_input`), 정렬(`st.segmented_control`), 즐겨찾기만 보기(`st.toggle`), 카드 목록, "더 보기" 버튼. 레시피가 없으면 "냉장고 사진으로 첫 레시피를 찾아보세요" 버튼을 보여 준다. |
-| 저장한 레시피 상세 | 2단계 상세 내용에 별점(`st.feedback("stars")`), 메모(`st.text_area`), 즐겨찾기, 편집, 원래대로, 삭제 버튼을 더한다. "생성할 때 쓴 재료"는 `st.expander`로 접어 둔다. |
-| 프로필 | `st.form` 하나로 묶는다. 알레르기와 싫어하는 재료는 `st.multiselect(accept_new_options=True)`. 알레르기 칸 옆에 "추천 레시피에서 항상 제외됩니다"라고 안내한다. |
-| 계정 삭제 | 프로필 페이지 맨 아래의 `st.expander("계정 삭제")` 안에 둔다. 빨간 버튼과 확인 문구 입력. |
+| 사이드바 | 로그인 상태(닉네임, 방식), 로그인·로그아웃. 로그인 상태면 "내 레시피", "프로필" 메뉴 |
+| 로그인 페이지 | `st.tabs(["로그인", "회원가입", "Google"])`. 로그인·가입은 `st.form`. 비밀번호 칸은 `type="password"`. 가입 칸 아래에 아이디·비밀번호 규칙을 안내한다. "비밀번호를 잊으면 되찾을 수 없어요"라고 가입 화면에 미리 알린다. |
+| 레시피 카드(2단계) | "저장" 단추. 저장된 레시피는 "저장됨 ✓". 비로그인이면 로그인 안내 |
+| 내 레시피 | 검색, 정렬(`st.segmented_control`), 즐겨찾기만(`st.toggle`), 카드 목록, "더 보기" |
+| 저장한 레시피 상세 | 2단계 상세에 별점, 메모, 즐겨찾기, 편집, 원래대로, 삭제 |
+| 프로필 | `st.form`. 알레르기·싫어하는 재료는 `st.multiselect(accept_new_options=True)`. 아이디 계정은 비밀번호 변경 칸 |
+| 계정 삭제 | 프로필 맨 아래 `st.expander("계정 삭제")`, 빨간 단추, 비밀번호 또는 확인 문구 |
+| 실패 표시 | DB 연결 실패, 저장 실패는 1·2단계와 같은 "❌ … 실패" 배너로 보여 준다 |
 
-- 사용자가 입력한 메모와 닉네임, 모델이 만든 글은 마크다운이나 HTML로 해석되지 않게 보여 준다(`st.text`나 이스케이프 처리). Streamlit은 기본적으로 HTML을 막지만, 마크다운 링크와 이미지 문법은 해석하기 때문이다.
+- 사용자가 입력한 메모·닉네임과 모델이 만든 글은 마크다운·HTML로 해석되지 않게 이스케이프한다.
 
 ## 10. 비기능 요구사항
 
 | 구분 | 요구사항 |
 |---|---|
-| 보안 | 신원은 `st.user`(Streamlit이 서명한 쿠키)로만 판단한다. 모든 DB 쿼리에 `user_id` 조건을 붙이고, 매개변수 바인딩만 쓴다(문자열로 SQL을 이어 붙이지 않음). |
-| 비밀 값 | Google 클라이언트 보안 비밀, `cookie_secret`, DB URL은 `st.secrets`에만 둔다. `.streamlit/secrets.toml`은 커밋하지 않는다. |
-| 개인정보 | 알레르기와 식이 조건은 건강 관련 정보로 취급한다. 로그에 남기지 않고, 계정을 삭제하면 즉시 지운다. 수집 항목(이메일, 이름, 프로필, 저장 레시피)을 프로필 페이지에 안내한다. 앱과 DB 위치(Community Cloud는 미국, Neon은 프로젝트를 만들 때 고른 지역)를 안내한다. |
-| 입력 검증 | 저장하는 `recipe` JSON은 2단계 레시피 스키마로 다시 검증한다. JSON 하나의 크기는 64KB로 제한한다. |
-| 성능 | 목록 조회는 500건 기준 1초 이내. Neon이 잠들어 있다가 깨어나면 첫 쿼리가 몇 초 늦을 수 있으므로, 연결 풀에 `pool_pre_ping=True`를 켜고 첫 조회에 스피너를 보여 준다. |
-| 무료 한도 | Neon 무료: 프로젝트당 1GB, 월 100 CU-시간. 사용자당 500개 제한과 64KB 제한으로 저장 공간을 보호한다. CU-시간을 다 쓰면 다음 달까지 DB가 멈추므로(데이터는 지워지지 않음), 이때는 "저장 기능을 잠시 쓸 수 없어요"라고 안내하고 1·2단계는 계속 쓸 수 있게 한다. |
+| 보안 | 비밀번호 argon2 해시, 로그인 실패 제한, 통일된 실패 문구. 세션 토큰은 DB에 해시로만 저장. 모든 DB 쿼리에 `user_id` 조건과 매개변수 바인딩. 테이블은 `app` 스키마 + RLS. |
+| 쿠키 한계 | 자바스크립트로 설정하는 쿠키는 `HttpOnly`를 쓸 수 없어서, 페이지에 악성 스크립트가 들어오면 토큰을 읽힐 수 있다. 앱은 모든 사용자 입력과 모델 출력을 이스케이프해서 이 위험을 줄인다. `Secure`, `SameSite=Lax`, 14일 만료를 쓴다. |
+| 비밀 값 | Google 클라이언트 보안 비밀, `cookie_secret`, Supabase 연결 문자열(DB 비밀번호 포함)은 `st.secrets`에만 둔다. |
+| 개인정보 | 알레르기·식이 조건은 건강 관련 정보로 취급한다. 로그에 남기지 않고, 계정 삭제 시 즉시 지운다. 수집 항목(아이디 또는 Google 이메일·이름, 프로필, 저장 레시피)과 저장 위치(Supabase 프로젝트 지역)를 프로필 화면에 안내한다. |
+| 성능 | 목록 조회는 500건 기준 1초 이내. 연결 풀에 `pool_pre_ping=True`. |
+| 무료 한도 | DB 500MB, 사용자당 500개·JSON 64KB 제한. |
 
 ## 11. 배포 추가 작업
 
-1. Neon(https://neon.com)에서 무료 프로젝트를 만들고 연결 문자열을 복사한다.
-2. Google Cloud 콘솔에서 OAuth 동의 화면과 "웹 애플리케이션" OAuth 클라이언트를 만든다. 승인된 리디렉션 URI에 `http://localhost:8501/oauth2callback`과 `https://<앱이름>.streamlit.app/oauth2callback`을 넣는다.
-3. Community Cloud 앱 설정의 Secrets에 6장의 `[auth]`, `[auth.google]`, `[connections.neon]` 값을 추가한다(배포용 `redirect_uri` 사용).
-4. `requirements.txt`에 추가 의존성을 넣고 푸시하면 자동으로 다시 배포된다.
+1. Supabase(https://supabase.com)에서 무료 프로젝트를 만든다. 지역은 사용자와 가까운 곳(예: 서울 `ap-northeast-2`)을 고른다.
+2. 대시보드 > Connect > **Session pooler** 연결 문자열을 복사해 `[connections.supabase]`에 넣는다(직접 연결은 IPv6 전용이라 쓰지 않음).
+3. Google Cloud 콘솔에서 OAuth 동의 화면과 "웹 애플리케이션" OAuth 클라이언트를 만들고, 리디렉션 URI에 `http://localhost:8501/oauth2callback`과 `https://<앱이름>.streamlit.app/oauth2callback`을 넣는다.
+4. Community Cloud 앱 설정의 Secrets에 6장의 값을 추가한다(배포용 `redirect_uri`).
+5. `requirements.txt`에 추가 의존성을 넣고 푸시한다.
+6. **일시 정지 방지(선택)**: 1주일 무활동 정지를 막으려면, GitHub Actions의 예약 작업(무료)으로 3~4일마다 간단한 쿼리(`SELECT 1`)를 보낸다. 연결 문자열은 GitHub 저장소 Secrets에 둔다. 이 작업을 두지 않으면, 정지된 동안 앱은 F3-26대로 실패를 표시한다.
 
 ## 12. 수용 기준
 
-- [ ] Google로 로그인하고, 로그아웃한 뒤 다시 로그인하면 같은 프로필과 저장 레시피가 보인다.
-- [ ] 로그아웃 상태에서는 "내 레시피"와 "프로필" 메뉴가 보이지 않고, 1·2단계는 그대로 쓸 수 있다.
-- [ ] 사용자 A의 `user_id`로 사용자 B의 저장 레시피 ID를 조회, 수정, 삭제하면 모두 실패한다(`repository` 단위 테스트).
-- [ ] 프로필 알레르기에 "달걀"을 넣으면, 조건 화면에서 알레르기를 지워도 생성된 레시피에 달걀이 나오지 않는다.
-- [ ] 같은 레시피를 두 번 저장하면 두 번째에 "이미 저장됨" 안내가 나오고, 목록에는 1개만 있다.
-- [ ] 저장한 레시피의 조리 순서를 고친 뒤 "원래대로"를 누르면 저장할 때의 내용으로 돌아간다.
-- [ ] 메모에 `[링크](https://example.com)`나 `<script>alert(1)</script>`를 넣어도 링크나 스크립트로 바뀌지 않고 글자 그대로 보인다.
-- [ ] 계정을 삭제하면 `users`, `profiles`, `saved_recipes`에서 그 사용자의 행이 모두 사라지고 로그아웃된다.
-- [ ] 앱을 재부팅(Community Cloud의 Reboot)해도 저장 레시피가 남아 있다.
+- [ ] 아이디로 가입하고, 로그아웃한 뒤 다시 로그인하면 같은 프로필과 저장 레시피가 보인다.
+- [ ] 아이디로 로그인한 뒤 브라우저를 새로고침해도 로그인이 유지된다. 로그아웃하면 새로고침해도 로그아웃 상태다.
+- [ ] Google로 로그인하면 별도 계정이 만들어지고, 같은 방식으로 저장·불러오기가 된다.
+- [ ] 규칙에 맞지 않는 아이디·비밀번호, 이미 있는 아이디로는 가입할 수 없고, 이유가 안내된다.
+- [ ] 틀린 아이디와 틀린 비밀번호의 실패 문구가 같다.
+- [ ] 같은 아이디로 5회 틀리면 15분 동안 로그인이 막히고 안내가 나온다(새로고침해도 유지).
+- [ ] DB의 `password_hash`는 argon2 형식이고, 평문 비밀번호는 DB와 로그 어디에도 없다.
+- [ ] 사용자 A로 사용자 B의 저장 레시피 ID를 조회·수정·삭제하면 모두 실패한다(`repository` 단위 테스트).
+- [ ] 프로필 알레르기에 "달걀"을 넣으면, 조건 화면에서 지워도 생성된 레시피에 달걀이 없다.
+- [ ] 같은 레시피를 두 번 저장하면 "이미 저장됨"이 나오고 목록에는 1개만 있다.
+- [ ] 메모에 `[링크](https://example.com)`나 `<script>alert(1)</script>`를 넣어도 글자 그대로 보인다.
+- [ ] 계정을 삭제하면 그 사용자의 모든 행이 사라지고 로그아웃된다.
+- [ ] Supabase REST API(anon 키)로 `app` 스키마의 어떤 테이블도 읽을 수 없다.
+- [ ] Supabase 프로젝트가 일시 정지된 상태에서 저장을 누르면 "❌ 저장소에 연결하지 못했어요"가 나오고, 1·2단계는 그대로 쓸 수 있다.
+- [ ] 앱을 재부팅해도 저장 레시피가 남아 있다.
 - [ ] `git status`에 `.streamlit/secrets.toml`이 나타나지 않는다.
 
 ## 13. 위험 요소와 대응
 
 | 위험 | 대응 |
 |---|---|
-| `st.login`을 거치면서 세션 상태가 초기화되어, 로그인 전에 만든 레시피가 사라질 수 있음 | 구현할 때 실제 동작을 확인한다. 초기화된다면, 사진을 올리기 전에 로그인하도록 첫 화면에서 권하고, 저장 버튼의 로그인 안내에 "로그인하면 지금 레시피는 다시 만들어야 해요"라고 알린다. |
-| Google OAuth 앱이 "테스트" 상태면 등록한 테스트 사용자만 로그인할 수 있음 | 학습·시연 단계에서는 테스트 사용자로 운영하고, 공개하려면 OAuth 동의 화면을 "프로덕션"으로 게시한다(기본 범위인 openid, email, profile만 쓰면 Google 심사가 필요 없을 가능성이 높으나, 게시할 때 확인한다). |
-| Neon 무료 한도(CU-시간) 소진 | 5분 무활동 시 자동으로 잠드는 기능 덕에 소규모 사용에서는 한도에 거의 닿지 않는다. 닿으면 10장대로 저장 기능만 멈춘다. |
-| 저장된 스냅숏이 2단계 스키마 변경과 맞지 않게 됨 | `schema_version`을 기록하고, 읽을 때 버전별 변환 함수를 거친다. |
-| 무료 서비스 정책 변경 | Community Cloud, Neon, OpenRouter의 무료 조건은 바뀔 수 있다(2026-10 확인). 연결 정보와 모델 ID를 모두 `st.secrets`로 분리해 두어, 다른 서비스로 옮기기 쉽게 한다. |
+| 직접 만든 아이디 로그인의 보안 허점 | 검증된 라이브러리(argon2-cffi)를 쓰고, 12장의 보안 수용 기준을 자동화 테스트로 확인한다. |
+| Community Cloud에서 쿠키가 동작하지 않을 가능성 | Community Cloud는 앱을 iframe 안에 보여 줄 수 있어서, 브라우저가 쿠키를 막을 수 있다. 배포 후 F3-6을 가장 먼저 확인한다. 동작하지 않으면 아이디 로그인은 "새로고침하면 다시 로그인"으로 낮추고 화면에 그렇게 안내한다(Google 로그인은 영향 없음). |
+| Supabase 1주일 무활동 일시 정지 | 11장의 예약 쿼리, 또는 정지 시 실패 표시(F3-26)와 대시보드에서 다시 켜기. |
+| 자동 백업 없음 | 필요할 때 `pg_dump`로 직접 백업한다. |
+| `st.login`을 거치며 세션 상태가 초기화되어 로그인 전에 만든 레시피가 사라질 수 있음 | 구현할 때 확인한다. 초기화되면 저장 단추의 로그인 안내에 "로그인하면 지금 레시피는 다시 만들어야 해요"라고 알린다. |
+| Google OAuth 앱이 "테스트" 상태면 등록한 사용자만 로그인 가능 | 시연 단계에서는 테스트 사용자로 운영하고, 공개할 때 동의 화면을 게시한다. |
+| 무료 서비스 정책 변경 | Community Cloud, Supabase, OpenRouter의 무료 조건은 바뀔 수 있다(2026-10 확인). 연결 정보와 모델 ID는 모두 `st.secrets`로 분리한다. |
 
-## 14. 미결정 사항
+## 14. 구현 메모 (2026-10-19)
 
-- 무료 사용량 보호를 위해 1·2단계도 로그인한 사용자만 쓰게 할지 여부. 그렇게 하면 사용자별 하루 요청 제한도 DB로 정확하게 셀 수 있다.
-- 1단계 인식 기록(재료 목록)을 계정에 남길지 여부. 남긴다면 "최근 냉장고 재료로 다시 추천" 기능을 붙일 수 있다.
-- 저장한 레시피 내보내기(인쇄용 화면, 텍스트 파일 다운로드 `st.download_button`) 제공 여부
+- **로컬 개발용 DB**: Supabase 설정이 없으면 같은 테이블 정의로 `data/local.db`(SQLite, git 제외)를 쓴다. 사이드바에 "로컬 개발용 DB(SQLite)를 쓰고 있어요"라고 알린다. 자동 테스트는 항상 메모리 SQLite를 쓴다.
+- **쿠키 순서**: 로그인 직후 페이지를 옮기면 그 실행의 화면 출력(쿠키 스크립트 포함)이 버려진다. 처음 구현에서는 그래서 쿠키가 설정되지 않았고, 테스트로 발견해 "이동 처리 → 쿠키 스크립트" 순서로 고쳤다. 브라우저에서 가입·새로고침(로그인 유지)·로그아웃·새로고침(로그아웃 유지)을 확인했다.
+- **내 레시피 펼침 유지**: 별점·메모를 저장하면 다시 실행되면서 펼쳐 둔 상세가 닫히는 문제가 있어, `st.expander(key=...)`와 토스트 알림으로 고쳤다.
+- **아직 확인하지 못한 것**: Supabase 연결과 RLS(12장 "REST API로 읽을 수 없음"), Google 로그인, Community Cloud에서의 쿠키 동작(13장 위험)은 Supabase 프로젝트와 Google OAuth 클라이언트를 만든 뒤 확인한다.
+
+## 15. 미결정 사항
+
+- 아이디 계정에 이메일(선택)을 받아 비밀번호 재설정을 지원할지 여부. 지원하려면 메일 발송 서비스가 필요하다.
+- 아이디 계정과 Google 계정을 연결하는 기능을 둘지 여부.
+- 무료 사용량 보호를 위해 1·2단계도 로그인한 사용자만 쓰게 할지 여부.

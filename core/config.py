@@ -79,6 +79,37 @@ def get_setting(name: str, default: str | None = None) -> str | None:
     return default
 
 
+LOCAL_DB_PATH = PROJECT_ROOT / "data" / "local.db"
+
+
+def database_url() -> str:
+    """st.secrets [connections.supabase] url → 환경 변수 DATABASE_URL → 로컬 개발용 SQLite 파일."""
+    try:
+        import streamlit as st
+
+        url = st.secrets["connections"]["supabase"]["url"]
+        if url:
+            return str(url)
+    except Exception:  # secrets.toml이 없거나 항목이 없으면 예외가 난다
+        pass
+    url = os.environ.get("DATABASE_URL") or _dotenv_values().get("DATABASE_URL")
+    if url:
+        return url
+    LOCAL_DB_PATH.parent.mkdir(exist_ok=True)
+    return f"sqlite:///{LOCAL_DB_PATH.as_posix()}"
+
+
+def google_login_configured() -> bool:
+    """st.login에 필요한 [auth] 설정이 있는가."""
+    try:
+        import streamlit as st
+
+        auth = st.secrets["auth"]
+        return bool(auth.get("redirect_uri") and auth.get("cookie_secret"))
+    except Exception:
+        return False
+
+
 def get_api_key() -> str | None:
     return get_setting("OPENROUTER_API_KEY")
 

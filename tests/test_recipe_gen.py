@@ -222,3 +222,13 @@ def test_request_recipes_blocks_when_daily_limit_reached():
     with pytest.raises(AppError) as exc:
         request_recipes({}, INGREDIENTS, Preferences(), [], generate=None, limiter=DailyLimiter(0), per_minute=3)
     assert exc.value.code == "DAILY_LIMIT"
+
+
+def test_profile_preferences_reach_prompt():
+    prompt = build_user_prompt(
+        clean_ingredients(INGREDIENTS), Preferences(disliked=["고수", "고수"], skill_level="beginner").cleaned(), [], [], 3
+    )
+    assert "[싫어하는 재료] 고수 (가능하면 쓰지 않는다)" in prompt
+    assert "[요리 실력] 초보" in prompt
+    plain = build_user_prompt(clean_ingredients(INGREDIENTS), Preferences(skill_level="expert").cleaned(), [], [], 3)
+    assert "[싫어하는 재료]" not in plain and "[요리 실력]" not in plain
